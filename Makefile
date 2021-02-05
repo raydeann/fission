@@ -53,7 +53,20 @@ image-multiarch:
 	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/fission-bundle:$(TAG) --push -f cmd/fission-bundle/Dockerfile.fission-bundle .
 	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/fetcher:$(TAG) --push -f cmd/fetcher/Dockerfile.fission-fetcher .
 	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/builder:$(TAG) --push -f cmd/builder/Dockerfile.fission-builder .
-	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/preupgradechecks:$(TAG) --push -f cmd/preupgradechecks/Dockerfile.fission-preupgradechecks .
+	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/pre-upgrade-checks:$(TAG) --push -f cmd/preupgradechecks/Dockerfile.fission-preupgradechecks . 
+
+multiarch-bundle:
+	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/fission-bundle:$(TAG) --push -f cmd/fission-bundle/Dockerfile.fission-bundle .
+
+multiarch-fetcher:
+	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/fetcher:$(TAG) --push -f cmd/fetcher/Dockerfile.fission-fetcher .
+
+multiarch-builder:
+	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/builder:$(TAG) --push -f cmd/builder/Dockerfile.fission-builder .
+
+multiarch-preupgrade:
+	docker buildx build --platform=$(PLATFORMS) -t $(REPO)/pre-upgrade-checks:$(TAG) --push -f cmd/preupgradechecks/Dockerfile.fission-preupgradechecks . 
+
 
 clean:
 	@rm -f cmd/fission-bundle/fission-bundle
