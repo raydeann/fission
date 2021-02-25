@@ -23,7 +23,7 @@ environments/php7/vendor/
 *.bak
 *.tmp
 *~
-*.tgz
+
 
 .DS_Store
 vendor/

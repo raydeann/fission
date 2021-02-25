@@ -1,0 +1,19 @@
+apiVersion: v1
+entries:
+  fission-core:
+    - description: Deploy core fission with no add-ons
+      name: fission-core 
+      sources: 
+        - https://github.com/fission/fission
+      urls:
+        - 
+  
+  fission-all:
+    - description: Deploy Fission along with add-ons
+      name: fission-all
+      sources: 
+        - https://github.com/fission/fission
+      urls:
+        - fission-core-1.12.0.tgz
+  
+      
