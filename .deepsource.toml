@@ -1,20 +1,9 @@
 version = 1
 
 [[analyzers]]
-name = "python"
-enabled = true
-
-  [analyzers.meta]
-  runtime_version = "3.x.x"
-
-[[analyzers]]
 name = "go"
 enabled = true
 
   [analyzers.meta]
   import_paths = ["github.com/raydeann/fission"]
   dependencies_vendored = true
-
-[[analyzers]]
-name = "ruby"
-enabled = true
