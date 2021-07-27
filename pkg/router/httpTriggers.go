@@ -23,16 +23,14 @@ import (
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	k8sCache "k8s.io/client-go/tools/cache"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	"github.com/fission/fission/pkg/crd"
 	executorClient "github.com/fission/fission/pkg/executor/client"
+	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	"github.com/fission/fission/pkg/throttler"
 	"github.com/fission/fission/pkg/utils"
 )
@@ -47,13 +45,10 @@ type HTTPTriggerSet struct {
 	kubeClient                 *kubernetes.Clientset
 	executor                   *executorClient.Client
 	resolver                   *functionReferenceResolver
-	crdClient                  rest.Interface
 	triggers                   []fv1.HTTPTrigger
-	triggerStore               k8sCache.Store
-	triggerController          k8sCache.Controller
+	triggerInformer            k8sCache.SharedIndexInformer
 	functions                  []fv1.Function
-	funcStore                  k8sCache.Store
-	funcController             k8sCache.Controller
+	funcInformer               k8sCache.SharedIndexInformer
 	updateRouterRequestChannel chan struct{}
 	tsRoundTripperParams       *tsRoundTripperParams
 	isDebugEnv                 bool
@@ -62,7 +57,7 @@ type HTTPTriggerSet struct {
 }
 
 func makeHTTPTriggerSet(logger *zap.Logger, fmap *functionServiceMap, fissionClient *crd.FissionClient,
-	kubeClient *kubernetes.Clientset, executor *executorClient.Client, crdClient rest.Interface, params *tsRoundTripperParams, isDebugEnv bool, unTapServiceTimeout time.Duration, actionThrottler *throttler.Throttler) (*HTTPTriggerSet, k8sCache.Store, k8sCache.Store) {
+	kubeClient *kubernetes.Clientset, executor *executorClient.Client, params *tsRoundTripperParams, isDebugEnv bool, unTapServiceTimeout time.Duration, actionThrottler *throttler.Throttler) *HTTPTriggerSet {
 
 	httpTriggerSet := &HTTPTriggerSet{
 		logger:                     logger.Named("http_trigger_set"),
@@ -71,28 +66,24 @@ func makeHTTPTriggerSet(logger *zap.Logger, fmap *functionServiceMap, fissionCli
 		fissionClient:              fissionClient,
 		kubeClient:                 kubeClient,
 		executor:                   executor,
-		crdClient:                  crdClient,
 		updateRouterRequestChannel: make(chan struct{}, 10), // use buffer channel
 		tsRoundTripperParams:       params,
 		isDebugEnv:                 isDebugEnv,
 		svcAddrUpdateThrottler:     actionThrottler,
 		unTapServiceTimeout:        unTapServiceTimeout,
 	}
-	var tStore, fnStore k8sCache.Store
-	var tController, fnController k8sCache.Controller
 
-	if httpTriggerSet.crdClient != nil {
-		tStore, tController = httpTriggerSet.initTriggerController()
-		httpTriggerSet.triggerStore = tStore
-		httpTriggerSet.triggerController = tController
-		fnStore, fnController = httpTriggerSet.initFunctionController()
-		httpTriggerSet.funcStore = fnStore
-		httpTriggerSet.funcController = fnController
-	}
-	return httpTriggerSet, tStore, fnStore
+	informerFactory := genInformer.NewSharedInformerFactory(fissionClient, time.Second*30)
+	httpTriggerSet.triggerInformer = informerFactory.Core().V1().HTTPTriggers().Informer()
+	httpTriggerSet.funcInformer = informerFactory.Core().V1().Functions().Informer()
+
+	httpTriggerSet.addTriggerHandlers()
+	httpTriggerSet.addFunctionHandlers()
+	return httpTriggerSet
 }
 
-func (ts *HTTPTriggerSet) subscribeRouter(ctx context.Context, mr *mutableRouter, resolver *functionReferenceResolver) {
+func (ts *HTTPTriggerSet) subscribeRouter(ctx context.Context, mr *mutableRouter) {
+	resolver := makeFunctionReferenceResolver(&ts.funcInformer)
 	ts.resolver = resolver
 	ts.mutableRouter = mr
 
@@ -104,8 +95,8 @@ func (ts *HTTPTriggerSet) subscribeRouter(ctx context.Context, mr *mutableRouter
 	}
 	go ts.updateRouter()
 	go ts.syncTriggers()
-	go ts.runWatcher(ctx, ts.funcController)
-	go ts.runWatcher(ctx, ts.triggerController)
+	go ts.runInformer(ctx, ts.funcInformer)
+	go ts.runInformer(ctx, ts.triggerInformer)
 }
 
 func defaultHomeHandler(w http.ResponseWriter, r *http.Request) {
@@ -166,13 +157,32 @@ func (ts *HTTPTriggerSet) getRouter(fnTimeoutMap map[types.UID]int) *mux.Router 
 				fh.function = fn
 			}
 		}
+		var ht *mux.Route
 
-		ht := muxRouter.HandleFunc(trigger.Spec.RelativeURL, fh.handler)
-		ht.Methods(trigger.Spec.Method)
+		if trigger.Spec.Prefix != nil && *trigger.Spec.Prefix != "" {
+			ht = muxRouter.PathPrefix(*trigger.Spec.Prefix).HandlerFunc(fh.handler)
+		} else {
+			ht = muxRouter.HandleFunc(trigger.Spec.RelativeURL, fh.handler)
+		}
+		methods := trigger.Spec.Methods
+		if len(trigger.Spec.Method) > 0 {
+			present := false
+			for _, m := range trigger.Spec.Methods {
+				if m == trigger.Spec.Method {
+					present = true
+					break
+				}
+			}
+			if !present {
+				methods = append(methods, trigger.Spec.Method)
+			}
+		}
+		ht.Methods(methods...)
 		if trigger.Spec.Host != "" {
 			ht.Host(trigger.Spec.Host)
 		}
-		if trigger.Spec.RelativeURL == "/" && trigger.Spec.Method == "GET" {
+
+		if trigger.Spec.Prefix == nil && trigger.Spec.RelativeURL == "/" && len(methods) == 1 && methods[0] == http.MethodGet {
 			homeHandled = true
 		}
 	}
@@ -202,7 +212,7 @@ func (ts *HTTPTriggerSet) getRouter(fnTimeoutMap map[types.UID]int) *mux.Router 
 			functionTimeoutMap:     fnTimeoutMap,
 			unTapServiceTimeout:    ts.unTapServiceTimeout,
 		}
-		muxRouter.HandleFunc(utils.UrlForFunction(fn.ObjectMeta.Name, fn.ObjectMeta.Namespace), fh.handler)
+		muxRouter.PathPrefix(utils.UrlForFunction(fn.ObjectMeta.Name, fn.ObjectMeta.Namespace)).HandlerFunc(fh.handler)
 	}
 
 	// Healthz endpoint for the router.
@@ -215,78 +225,70 @@ func (ts *HTTPTriggerSet) updateTriggerStatusFailed(ht *fv1.HTTPTrigger, err err
 	// TODO
 }
 
-func (ts *HTTPTriggerSet) initTriggerController() (k8sCache.Store, k8sCache.Controller) {
-	resyncPeriod := 30 * time.Second
-	listWatch := k8sCache.NewListWatchFromClient(ts.crdClient, "httptriggers", metav1.NamespaceAll, fields.Everything())
-	store, controller := k8sCache.NewInformer(listWatch, &fv1.HTTPTrigger{}, resyncPeriod,
-		k8sCache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				trigger := obj.(*fv1.HTTPTrigger)
-				go createIngress(ts.logger, trigger, ts.kubeClient)
-				ts.syncTriggers()
-			},
-			DeleteFunc: func(obj interface{}) {
-				ts.syncTriggers()
-				trigger := obj.(*fv1.HTTPTrigger)
-				go deleteIngress(ts.logger, trigger, ts.kubeClient)
-			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-				oldTrigger := oldObj.(*fv1.HTTPTrigger)
-				newTrigger := newObj.(*fv1.HTTPTrigger)
+func (ts *HTTPTriggerSet) addTriggerHandlers() {
+	ts.triggerInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			trigger := obj.(*fv1.HTTPTrigger)
+			go createIngress(ts.logger, trigger, ts.kubeClient)
+			ts.syncTriggers()
+		},
+		DeleteFunc: func(obj interface{}) {
+			ts.syncTriggers()
+			trigger := obj.(*fv1.HTTPTrigger)
+			go deleteIngress(ts.logger, trigger, ts.kubeClient)
+		},
+		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+			oldTrigger := oldObj.(*fv1.HTTPTrigger)
+			newTrigger := newObj.(*fv1.HTTPTrigger)
 
-				if oldTrigger.ObjectMeta.ResourceVersion == newTrigger.ObjectMeta.ResourceVersion {
-					return
-				}
+			if oldTrigger.ObjectMeta.ResourceVersion == newTrigger.ObjectMeta.ResourceVersion {
+				return
+			}
 
-				go updateIngress(ts.logger, oldTrigger, newTrigger, ts.kubeClient)
-				ts.syncTriggers()
-			},
-		})
-	return store, controller
+			go updateIngress(ts.logger, oldTrigger, newTrigger, ts.kubeClient)
+			ts.syncTriggers()
+		},
+	})
 }
 
-func (ts *HTTPTriggerSet) initFunctionController() (k8sCache.Store, k8sCache.Controller) {
-	resyncPeriod := 30 * time.Second
-	listWatch := k8sCache.NewListWatchFromClient(ts.crdClient, "functions", metav1.NamespaceAll, fields.Everything())
-	store, controller := k8sCache.NewInformer(listWatch, &fv1.Function{}, resyncPeriod,
-		k8sCache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				ts.syncTriggers()
-			},
-			DeleteFunc: func(obj interface{}) {
-				ts.syncTriggers()
-			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-				oldFn := oldObj.(*fv1.Function)
-				fn := newObj.(*fv1.Function)
+func (ts *HTTPTriggerSet) addFunctionHandlers() {
+	ts.funcInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			ts.syncTriggers()
+		},
+		DeleteFunc: func(obj interface{}) {
+			ts.syncTriggers()
+		},
+		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+			oldFn := oldObj.(*fv1.Function)
+			fn := newObj.(*fv1.Function)
 
-				if oldFn.ObjectMeta.ResourceVersion == fn.ObjectMeta.ResourceVersion {
-					return
-				}
+			if oldFn.ObjectMeta.ResourceVersion == fn.ObjectMeta.ResourceVersion {
+				return
+			}
 
-				// update resolver function reference cache
-				for key, rr := range ts.resolver.copy() {
-					if key.namespace == fn.ObjectMeta.Namespace &&
-						rr.functionMap[fn.ObjectMeta.Name] != nil &&
-						rr.functionMap[fn.ObjectMeta.Name].ObjectMeta.ResourceVersion != fn.ObjectMeta.ResourceVersion {
-						// invalidate resolver cache
-						ts.logger.Debug("invalidating resolver cache")
-						err := ts.resolver.delete(key.namespace, key.triggerName, key.triggerResourceVersion)
-						if err != nil {
-							ts.logger.Error("error deleting functionReferenceResolver cache", zap.Error(err))
-						}
-						break
+			// update resolver function reference cache
+			for key, rr := range ts.resolver.copy() {
+				if key.namespace == fn.ObjectMeta.Namespace &&
+					rr.functionMap[fn.ObjectMeta.Name] != nil &&
+					rr.functionMap[fn.ObjectMeta.Name].ObjectMeta.ResourceVersion != fn.ObjectMeta.ResourceVersion {
+					// invalidate resolver cache
+					ts.logger.Debug("invalidating resolver cache")
+					err := ts.resolver.delete(key.namespace, key.triggerName, key.triggerResourceVersion)
+					if err != nil {
+						ts.logger.Error("error deleting functionReferenceResolver cache", zap.Error(err))
 					}
+					break
 				}
-				ts.syncTriggers()
-			},
-		})
-	return store, controller
+			}
+			ts.syncTriggers()
+		},
+	})
 }
 
-func (ts *HTTPTriggerSet) runWatcher(ctx context.Context, controller k8sCache.Controller) {
+func (ts *HTTPTriggerSet) runInformer(ctx context.Context, informer k8sCache.SharedIndexInformer) {
 	go func() {
-		controller.Run(ctx.Done())
+		informer.Run(ctx.Done())
 	}()
 }
 
@@ -297,7 +299,7 @@ func (ts *HTTPTriggerSet) syncTriggers() {
 func (ts *HTTPTriggerSet) updateRouter() {
 	for range ts.updateRouterRequestChannel {
 		// get triggers
-		latestTriggers := ts.triggerStore.List()
+		latestTriggers := ts.triggerInformer.GetStore().List()
 		triggers := make([]fv1.HTTPTrigger, len(latestTriggers))
 		for _, t := range latestTriggers {
 			triggers = append(triggers, *t.(*fv1.HTTPTrigger))
@@ -305,7 +307,7 @@ func (ts *HTTPTriggerSet) updateRouter() {
 		ts.triggers = triggers
 
 		// get functions
-		latestFunctions := ts.funcStore.List()
+		latestFunctions := ts.funcInformer.GetStore().List()
 		functionTimeout := make(map[types.UID]int, len(latestFunctions))
 		functions := make([]fv1.Function, len(latestFunctions))
 		for _, f := range latestFunctions {

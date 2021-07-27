@@ -72,6 +72,7 @@ rules:
   - services
   - serviceaccounts
   - namespaces
+  - events
   verbs:
   - create
   - delete
@@ -147,6 +148,13 @@ rules:
   - triggerauthentications/status
   verbs:
   - '*'
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
 
 
 ---
@@ -204,8 +212,17 @@ rules:
   resources:
   - configmaps
   - secrets
+  - pods
   verbs:
   - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - '*'
 - apiGroups:
   - fission.io
   resources:
@@ -323,6 +340,8 @@ spec:
           value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
@@ -347,6 +366,10 @@ spec:
         ports:
           - containerPort: 8888
             name: http
+        {{- if .Values.pprof.enabled }}
+          - containerPort: 6060
+            name: pprof
+        {{- end }}
       serviceAccountName: fission-svc
       volumes:
       - name: config-volume
@@ -415,6 +438,8 @@ spec:
           value: {{ .Values.fetcher.resource.mem.limits | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
         readinessProbe:
           httpGet:
             path: "/healthz"
@@ -433,6 +458,10 @@ spec:
           name: metrics
         - containerPort: 8888
           name: http
+        {{- if .Values.pprof.enabled }}
+        - containerPort: 6060
+          name: pprof
+        {{- end }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -489,6 +518,8 @@ spec:
           value: {{ .Values.fetcher.resource.mem.limits | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -525,6 +556,8 @@ spec:
           value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -598,7 +631,7 @@ metadata:
     kubernetes.io/cluster-service: 'true'
     kubernetes.io/name: heapster
 spec:
-  type: ClusterIP 
+  type: ClusterIP
   ports:
   - port: 80
     targetPort: 8082
@@ -627,7 +660,7 @@ spec:
       - name: heapster
         image: gcr.io/google_containers/heapster-amd64:v1.5.0
         imagePullPolicy: {{ .Values.pullPolicy }}
-        command: 
+        command:
         - /heapster
         - --source=kubernetes:https://kubernetes.default
       serviceAccountName: {{ .Release.Namespace }}/fission-svc
@@ -659,6 +692,8 @@ spec:
         env:
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -798,6 +833,8 @@ spec:
           value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -849,6 +886,8 @@ spec:
           value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
         # TLS authentication is TLS with authentication (2 way)
         # More info: https://docs.confluent.io/current/kafka/authentication_ssl.html#ssl-overview
         {{- if .Values.kafka.authentication.tls.enabled }}
@@ -861,7 +900,7 @@ spec:
         volumeMounts:
         - name: kafka-secrets
           mountPath: /etc/fission/secrets
-        {{- end }}        
+        {{- end }}
       serviceAccountName: fission-svc
       {{- if .Values.kafka.authentication.tls.enabled }}
       volumes:
@@ -874,7 +913,7 @@ spec:
 {{- if .Values.kafka.authentication.tls.enabled }}
 apiVersion: v1
 kind: Secret
-metadata: 
+metadata:
   name: mqtrigger-kafka-secrets
   labels:
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
@@ -936,7 +975,7 @@ spec:
         - name: TRACE_JAEGER_COLLECTOR_ENDPOINT
           value: "{{ .Values.traceCollectorEndpoint }}"
         - name: TRACING_SAMPLING_RATE
-          value: {{ .Values.traceSamplingRate | default "0.5" | quote }}        
+          value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: MESSAGE_QUEUE_TYPE
           value: azure-storage-queue
         - name: AZURE_STORAGE_ACCOUNT_NAME
@@ -948,6 +987,8 @@ spec:
               key: key
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
@@ -993,6 +1034,8 @@ spec:
           value: "{{.Values.pruneInterval}}"
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: PPROF_ENABLED
+          value: {{ .Values.pprof.enabled | quote }}
         {{- if and (.Values.persistence.enabled) (eq (.Values.persistence.storageType | default "local") "s3") }}
         - name: STORAGE_S3_ENDPOINT
           value: {{ .Values.persistence.s3.endPoint }}
@@ -1028,6 +1071,10 @@ spec:
         ports:
           - containerPort: 8000
             name: http
+          {{- if .Values.pprof.enabled }}
+          - containerPort: 6060
+            name: pprof
+          {{- end }}
       serviceAccountName: fission-svc
       {{- if and (.Values.persistence.enabled) (ne (.Values.persistence.storageType | default "local") "s3") }}
       volumes:
@@ -1078,18 +1125,50 @@ spec:
           value: {{ .Values.traceSamplingRate | default "0.5" | quote }}
         - name: DEBUG_ENV
           value: {{ .Values.debugEnv | quote }}
+        - name: CONNECTOR_IMAGE_PULL_POLICY
+          value: "{{ .Values.pullPolicy }}"
         - name: KAFKA_IMAGE
           value: "{{ .Values.mqt_keda.connector_images.kafka.image }}:{{ .Values.mqt_keda.connector_images.kafka.tag }}"
         - name: RABBITMQ_IMAGE
           value: "{{ .Values.mqt_keda.connector_images.rabbitmq.image }}:{{ .Values.mqt_keda.connector_images.rabbitmq.tag }}"
         - name: AWS-KINESIS-STREAM_IMAGE
-          value: "{{ .Values.mqt_keda.connector_images.awskinesis.image }}:{{ .Values.mqt_keda.connector_images.awskinesis.tag }}"           
+          value: "{{ .Values.mqt_keda.connector_images.awskinesis.image }}:{{ .Values.mqt_keda.connector_images.awskinesis.tag }}"
         - name: AWS-SQS-QUEUE_IMAGE
           value: "{{ .Values.mqt_keda.connector_images.aws_sqs.image }}:{{ .Values.mqt_keda.connector_images.aws_sqs.tag }}"
         - name: STAN_IMAGE
-          value: "{{ .Values.mqt_keda.connector_images.nats_steaming.image }}:{{ .Values.mqt_keda.connector_images.nats_steaming.tag }}"          
+          value: "{{ .Values.mqt_keda.connector_images.nats_steaming.image }}:{{ .Values.mqt_keda.connector_images.nats_steaming.tag }}"
+        - name: GCP-PUB-SUB_IMAGE
+          value: "{{ .Values.mqt_keda.connector_images.gcp_pub_sub.image }}:{{ .Values.mqt_keda.connector_images.gcp_pub_sub.tag }}"
       serviceAccountName: fission-svc
 {{- if .Values.extraCoreComponentPodConfig }}
 {{ toYaml .Values.extraCoreComponentPodConfig | indent 6 -}}
 {{- end }}
 {{- end }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: {{ .Values.functionNamespace }}
+  name: event-fetcher
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["events"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fission-fetcher-pod-reader
+  namespace: {{ .Values.functionNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: event-fetcher
+subjects:
+- kind: ServiceAccount
+  name: fission-fetcher
+  namespace: {{ .Values.functionNamespace }}

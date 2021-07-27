@@ -17,6 +17,7 @@ limitations under the License.
 package v1
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -273,6 +274,10 @@ func (spec FunctionSpec) Validate() error {
 		result = multierror.Append(result, spec.InvokeStrategy.Validate())
 	}
 
+	if spec.InvokeStrategy.ExecutionStrategy.ExecutorType == ExecutorTypeContainer && spec.PodSpec == nil {
+		result = multierror.Append(result, MakeValidationErr(ErrorInvalidObject, "FunctionSpec.PodSpec", "", "executor type container requires a pod spec"))
+	}
+
 	// TODO Add below validation warning
 	/*if spec.FunctionTimeout <= 0 {
 		result = multierror.Append(result, MakeValidationErr(ErrorInvalidValue, "FunctionTimeout value", spec.FunctionTimeout, "not a valid value. Should always be more than 0"))
@@ -299,7 +304,7 @@ func (es ExecutionStrategy) Validate() error {
 	result := &multierror.Error{}
 
 	switch es.ExecutorType {
-	case ExecutorTypeNewdeploy, ExecutorTypePoolmgr: // no op
+	case ExecutorTypeNewdeploy, ExecutorTypePoolmgr, ExecutorTypeContainer: // no op
 	default:
 		result = multierror.Append(result, MakeValidationErr(ErrorUnsupportedType, "ExecutionStrategy.ExecutorType", es.ExecutorType, "not a valid executor type"))
 	}
@@ -400,12 +405,23 @@ func (spec EnvironmentSpec) Validate() error {
 
 func (spec HTTPTriggerSpec) Validate() error {
 	result := &multierror.Error{}
+	checkMethod := func(method string, result *multierror.Error) *multierror.Error {
+		switch method {
+		case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+			http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace: // no op
+		default:
+			result = multierror.Append(result, MakeValidationErr(ErrorUnsupportedType, "HTTPTriggerSpec.Method", spec.Method, "not a valid HTTP method"))
+		}
+		return result
+	}
+	if len(spec.Methods) > 0 {
+		for _, method := range spec.Methods {
+			result = checkMethod(method, result)
+		}
+	}
 
-	switch spec.Method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
-		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace: // no op
-	default:
-		result = multierror.Append(result, MakeValidationErr(ErrorUnsupportedType, "HTTPTriggerSpec.Method", spec.Method, "not a valid HTTP method"))
+	if len(spec.Method) > 0 {
+		result = checkMethod(spec.Method, result)
 	}
 
 	result = multierror.Append(result, spec.FunctionReference.Validate())
@@ -571,6 +587,13 @@ func (e *Environment) Validate() error {
 		validateMetadata("Environment", e.ObjectMeta),
 		e.Spec.Validate())
 
+	if e.Spec.Runtime.PodSpec != nil {
+		for _, container := range e.Spec.Runtime.PodSpec.Containers {
+			if container.Command == nil && container.Image == e.Spec.Runtime.Image && container.Name != e.ObjectMeta.Name {
+				result = multierror.Append(result, errors.New("container with image same as runtime image in podspec, must have name same as environment name"))
+			}
+		}
+	}
 	return result.ErrorOrNil()
 }
 

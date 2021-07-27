@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"sync/atomic"
 
 	"contrib.go.opencensus.io/exporter/jaeger"
 	"go.opencensus.io/plugin/ochttp"
@@ -30,6 +32,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/fission/fission/pkg/fetcher"
+)
+
+var (
+	readyToServe uint32
 )
 
 func registerTraceExporter(collectorEndpoint string) error {
@@ -79,16 +85,16 @@ func Run(logger *zap.Logger) {
 		}
 	}
 
-	if err := registerTraceExporter(*collectorEndpoint); err != nil {
-		logger.Fatal("could not register trace exporter", zap.Error(err), zap.String("collector_endpoint", *collectorEndpoint))
-	}
+	go func() {
+		if err := registerTraceExporter(*collectorEndpoint); err != nil {
+			logger.Fatal("could not register trace exporter", zap.Error(err), zap.String("collector_endpoint", *collectorEndpoint))
+		}
+	}()
 
 	f, err := fetcher.MakeFetcher(logger, dir, *secretDir, *configDir)
 	if err != nil {
 		logger.Fatal("error making fetcher", zap.Error(err))
 	}
-
-	readyToServe := false
 
 	// do specialization in other goroutine to prevent blocking in newdeploy
 	go func() {
@@ -105,9 +111,8 @@ func Run(logger *zap.Logger) {
 			if err != nil {
 				logger.Fatal("error specializing function pod", zap.Error(err))
 			}
-
-			readyToServe = true
 		}
+		atomic.StoreUint32(&readyToServe, 1)
 	}()
 
 	mux := http.NewServeMux()
@@ -115,9 +120,11 @@ func Run(logger *zap.Logger) {
 	mux.HandleFunc("/specialize", f.SpecializeHandler)
 	mux.HandleFunc("/upload", f.UploadHandler)
 	mux.HandleFunc("/version", f.VersionHandler)
+	mux.HandleFunc("/wsevent/start", f.WsStartHandler)
+	mux.HandleFunc("/wsevent/end", f.WsEndHandler)
 
 	readinessHandler := func(w http.ResponseWriter, r *http.Request) {
-		if !*specializeOnStart || readyToServe {
+		if atomic.LoadUint32(&readyToServe) == 1 {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -129,14 +136,13 @@ func Run(logger *zap.Logger) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// For backward compatibility
-	// TODO: remove this path in future
-	mux.HandleFunc("/readniess-healthz", readinessHandler)
-
 	logger.Info("fetcher ready to receive requests")
-	http.ListenAndServe(":8000", &ochttp.Handler{
+	err = http.ListenAndServe(":8000", &ochttp.Handler{
 		Handler: mux,
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func fetcherUsage() {

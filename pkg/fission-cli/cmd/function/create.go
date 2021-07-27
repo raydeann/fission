@@ -18,7 +18,6 @@ package function
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
@@ -41,7 +40,7 @@ import (
 const (
 	DEFAULT_MIN_SCALE             = 1
 	DEFAULT_TARGET_CPU_PERCENTAGE = 80
-	DEFAULT_CONCURRENCY           = 5
+	DEFAULT_CONCURRENCY           = 500
 )
 
 type CreateSubCommand struct {
@@ -101,6 +100,10 @@ func (opts *CreateSubCommand) complete(input cli.Input) error {
 	if input.IsSet(flagkey.FnConcurrency) {
 		fnConcurrency = input.Int(flagkey.FnConcurrency)
 	}
+
+	requestsPerPod := input.Int(flagkey.FnRequestsPerPod)
+
+	fnOnceOnly := input.Bool(flagkey.FnOnceOnly)
 
 	pkgName := input.String(flagkey.FnPackageName)
 
@@ -282,18 +285,6 @@ func (opts *CreateSubCommand) complete(input cli.Input) error {
 			Namespace: fnNamespace,
 		},
 		Spec: fv1.FunctionSpec{
-			Environment: fv1.EnvironmentReference{
-				Name:      envName,
-				Namespace: envNamespace,
-			},
-			Package: fv1.FunctionPackageRef{
-				FunctionName: entrypoint,
-				PackageRef: fv1.PackageRef{
-					Namespace:       pkgMetadata.Namespace,
-					Name:            pkgMetadata.Name,
-					ResourceVersion: pkgMetadata.ResourceVersion,
-				},
-			},
 			Secrets:         secrets,
 			ConfigMaps:      cfgmaps,
 			Resources:       *resourceReq,
@@ -301,6 +292,25 @@ func (opts *CreateSubCommand) complete(input cli.Input) error {
 			FunctionTimeout: fnTimeout,
 			IdleTimeout:     &fnIdleTimeout,
 			Concurrency:     fnConcurrency,
+			RequestsPerPod:  requestsPerPod,
+			OnceOnly:        fnOnceOnly,
+		},
+	}
+
+	err = util.ApplyLabelsAndAnnotations(input, &opts.function.ObjectMeta)
+	if err != nil {
+		return err
+	}
+	opts.function.Spec.Environment = fv1.EnvironmentReference{
+		Name:      envName,
+		Namespace: envNamespace,
+	}
+	opts.function.Spec.Package = fv1.FunctionPackageRef{
+		FunctionName: entrypoint,
+		PackageRef: fv1.PackageRef{
+			Namespace:       pkgMetadata.Namespace,
+			Name:            pkgMetadata.Name,
+			ResourceVersion: pkgMetadata.ResourceVersion,
 		},
 	}
 
@@ -333,16 +343,24 @@ func (opts *CreateSubCommand) run(input cli.Input) error {
 
 	// Allow the user to specify an HTTP trigger while creating a function.
 	triggerUrl := input.String(flagkey.HtUrl)
-	if len(triggerUrl) == 0 {
+	prefix := input.String(flagkey.HtPrefix)
+	if len(triggerUrl) == 0 && len(prefix) == 0 {
 		return nil
 	}
-	if !strings.HasPrefix(triggerUrl, "/") {
-		triggerUrl = fmt.Sprintf("/%s", triggerUrl)
+	if len(prefix) != 0 && len(triggerUrl) > 0 {
+		console.Warn("Prefix will take precedence over URL/RelativeURL")
 	}
 
-	method, err := httptrigger.GetMethod(input.String(flagkey.HtMethod))
-	if err != nil {
-		return errors.Wrap(err, "error getting HTTP trigger method")
+	methods := input.StringSlice(flagkey.HtMethod)
+	if len(methods) == 0 {
+		return errors.New("HTTP methods not mentioned")
+	}
+
+	for _, method := range methods {
+		_, err := httptrigger.GetMethod(method)
+		if err != nil {
+			return err
+		}
 	}
 
 	triggerName := uuid.NewV4().String()
@@ -353,7 +371,8 @@ func (opts *CreateSubCommand) run(input cli.Input) error {
 		},
 		Spec: fv1.HTTPTriggerSpec{
 			RelativeURL: triggerUrl,
-			Method:      method,
+			Prefix:      &prefix,
+			Methods:     methods,
 			FunctionReference: fv1.FunctionReference{
 				Type: fv1.FunctionReferenceTypeFunctionName,
 				Name: opts.function.ObjectMeta.Name,
@@ -365,7 +384,7 @@ func (opts *CreateSubCommand) run(input cli.Input) error {
 		return errors.Wrap(err, "error creating HTTP trigger")
 	}
 
-	fmt.Printf("route created: %v %v -> %v\n", method, triggerUrl, opts.function.ObjectMeta.Name)
+	fmt.Printf("route created: %v %v -> %v\n", methods, triggerUrl, opts.function.ObjectMeta.Name)
 	return nil
 }
 
@@ -373,13 +392,19 @@ func getInvokeStrategy(input cli.Input, existingInvokeStrategy *fv1.InvokeStrate
 	var es *fv1.ExecutionStrategy
 
 	if existingInvokeStrategy == nil {
-		es, err = getExecutionStrategy(input)
+		executorType, err := getExecutorType(input)
+		if err != nil {
+			return nil, err
+		}
+		es, err = getExecutionStrategy(executorType, input)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		es, err = updateExecutionStrategy(input, &existingInvokeStrategy.ExecutionStrategy)
-	}
-
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &fv1.InvokeStrategy{
@@ -388,20 +413,23 @@ func getInvokeStrategy(input cli.Input, existingInvokeStrategy *fv1.InvokeStrate
 	}, nil
 }
 
-func getExecutionStrategy(input cli.Input) (strategy *fv1.ExecutionStrategy, err error) {
-	var fnExecutor fv1.ExecutorType
-
+func getExecutorType(input cli.Input) (executorType fv1.ExecutorType, err error) {
 	switch input.String(flagkey.FnExecutorType) {
 	case "":
 		fallthrough
 	case string(fv1.ExecutorTypePoolmgr):
-		fnExecutor = fv1.ExecutorTypePoolmgr
+		executorType = fv1.ExecutorTypePoolmgr
 	case string(fv1.ExecutorTypeNewdeploy):
-		fnExecutor = fv1.ExecutorTypeNewdeploy
+		executorType = fv1.ExecutorTypeNewdeploy
+	case string(fv1.ExecutorTypeContainer):
+		executorType = fv1.ExecutorTypeContainer
 	default:
-		return nil, errors.Errorf("executor type must be one of '%v' or '%v'", fv1.ExecutorTypePoolmgr, fv1.ExecutorTypeNewdeploy)
+		err = errors.Errorf("executor type must be one of '%v', '%v' or '%v'", fv1.ExecutorTypePoolmgr, fv1.ExecutorTypeNewdeploy, fv1.ExecutorTypeContainer)
 	}
+	return executorType, err
+}
 
+func getExecutionStrategy(fnExecutor fv1.ExecutorType, input cli.Input) (strategy *fv1.ExecutionStrategy, err error) {
 	specializationTimeout := fv1.DefaultSpecializationTimeOut
 
 	if input.IsSet(flagkey.FnSpecializationTimeout) {
@@ -476,8 +504,10 @@ func updateExecutionStrategy(input cli.Input, existingExecutionStrategy *fv1.Exe
 			fnExecutor = fv1.ExecutorTypePoolmgr
 		case string(fv1.ExecutorTypeNewdeploy):
 			fnExecutor = fv1.ExecutorTypeNewdeploy
+		case string(fv1.ExecutorTypeContainer):
+			fnExecutor = fv1.ExecutorTypeContainer
 		default:
-			return nil, errors.Errorf("executor type must be one of '%v' or '%v'", fv1.ExecutorTypePoolmgr, fv1.ExecutorTypeNewdeploy)
+			return nil, errors.Errorf("executor type must be one of '%v', %v or '%v'", fv1.ExecutorTypePoolmgr, fv1.ExecutorTypeNewdeploy, fv1.ExecutorTypeContainer)
 		}
 	}
 

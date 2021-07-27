@@ -17,10 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sort"
 
 	"github.com/emicklei/go-restful"
 	restfulspec "github.com/emicklei/go-restful-openapi"
@@ -105,7 +107,7 @@ func (a *API) HTTPTriggerApiList(w http.ResponseWriter, r *http.Request) {
 		ns = metav1.NamespaceAll
 	}
 
-	triggers, err := a.fissionClient.CoreV1().HTTPTriggers(ns).List(metav1.ListOptions{})
+	triggers, err := a.fissionClient.CoreV1().HTTPTriggers(ns).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		a.respondWithError(w, err)
 		return
@@ -122,7 +124,7 @@ func (a *API) HTTPTriggerApiList(w http.ResponseWriter, r *http.Request) {
 
 // checkHTTPTriggerDuplicates checks whether the tuple (Method, Host, URL) is duplicate or not.
 func (a *API) checkHTTPTriggerDuplicates(t *fv1.HTTPTrigger) error {
-	triggers, err := a.fissionClient.CoreV1().HTTPTriggers(metav1.NamespaceAll).List(metav1.ListOptions{})
+	triggers, err := a.fissionClient.CoreV1().HTTPTriggers(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -131,7 +133,22 @@ func (a *API) checkHTTPTriggerDuplicates(t *fv1.HTTPTrigger) error {
 			// Same resource. No need to check.
 			continue
 		}
-		if ht.Spec.RelativeURL == t.Spec.RelativeURL && ht.Spec.Method == t.Spec.Method && ht.Spec.Host == t.Spec.Host {
+		urlMatch := false
+		if ht.Spec.RelativeURL == t.Spec.RelativeURL || (ht.Spec.Prefix != nil && t.Spec.Prefix != nil && *ht.Spec.Prefix != "" && *ht.Spec.Prefix == *t.Spec.Prefix) {
+			urlMatch = true
+		}
+		methodMatch := false
+		if ht.Spec.Method == t.Spec.Method && len(ht.Spec.Methods) == len(t.Spec.Methods) {
+			methodMatch = true
+			sort.Strings(ht.Spec.Methods)
+			sort.Strings(t.Spec.Methods)
+			for i, m1 := range ht.Spec.Methods {
+				if m1 != t.Spec.Methods[i] {
+					methodMatch = false
+				}
+			}
+		}
+		if urlMatch && methodMatch && ht.Spec.Method == t.Spec.Method && ht.Spec.Host == t.Spec.Host {
 			return ferror.MakeError(ferror.ErrorNameExists,
 				fmt.Sprintf("HTTPTrigger with same Host, URL & method already exists (%v)",
 					ht.ObjectMeta.Name))
@@ -168,7 +185,7 @@ func (a *API) HTTPTriggerApiCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnew, err := a.fissionClient.CoreV1().HTTPTriggers(t.ObjectMeta.Namespace).Create(&t)
+	tnew, err := a.fissionClient.CoreV1().HTTPTriggers(t.ObjectMeta.Namespace).Create(context.TODO(), &t, metav1.CreateOptions{})
 	if err != nil {
 		a.respondWithError(w, err)
 		return
@@ -192,7 +209,7 @@ func (a *API) HTTPTriggerApiGet(w http.ResponseWriter, r *http.Request) {
 		ns = metav1.NamespaceDefault
 	}
 
-	t, err := a.fissionClient.CoreV1().HTTPTriggers(ns).Get(name, metav1.GetOptions{})
+	t, err := a.fissionClient.CoreV1().HTTPTriggers(ns).Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
 		a.respondWithError(w, err)
 		return
@@ -236,7 +253,7 @@ func (a *API) HTTPTriggerApiUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnew, err := a.fissionClient.CoreV1().HTTPTriggers(t.ObjectMeta.Namespace).Update(&t)
+	tnew, err := a.fissionClient.CoreV1().HTTPTriggers(t.ObjectMeta.Namespace).Update(context.TODO(), &t, metav1.UpdateOptions{})
 	if err != nil {
 		a.respondWithError(w, err)
 		return
@@ -258,7 +275,7 @@ func (a *API) HTTPTriggerApiDelete(w http.ResponseWriter, r *http.Request) {
 		ns = metav1.NamespaceDefault
 	}
 
-	err := a.fissionClient.CoreV1().HTTPTriggers(ns).Delete(name, &metav1.DeleteOptions{})
+	err := a.fissionClient.CoreV1().HTTPTriggers(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
 		a.respondWithError(w, err)
 		return

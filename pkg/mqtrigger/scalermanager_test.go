@@ -1,22 +1,20 @@
 package mqtrigger
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sort"
 	"testing"
 
-	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	dynfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+
+	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 )
 
 func Test_toEnvVar(t *testing.T) {
@@ -99,7 +97,7 @@ func Test_getEnvVarlist(t *testing.T) {
 	}
 
 	kubeClient := fake.NewSimpleClientset()
-	_, err := kubeClient.CoreV1().Secrets(namespace).Create(secret)
+	_, err := kubeClient.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	if err != nil {
 		assert.Equal(t, nil, err)
 	}
@@ -372,55 +370,6 @@ func Test_checkAndUpdateTriggerFields(t *testing.T) {
 	}
 }
 
-func newUnstructured(apiVersion, kind, namespace, name, resourceVersion string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": apiVersion,
-			"kind":       kind,
-			"metadata": map[string]interface{}{
-				"namespace":       namespace,
-				"name":            name,
-				"resourceVersion": resourceVersion,
-			},
-		},
-	}
-}
-
-func Test_getResourceVersion(t *testing.T) {
-	scheme := runtime.NewScheme()
-	client := dynfake.NewSimpleDynamicClient(scheme, newUnstructured(apiVersion, "ScaledObject", "default", "test-1", "12345"))
-	dynamicResourceClient := client.Resource(schema.GroupVersionResource{
-		Group:    Group,
-		Version:  Version,
-		Resource: "scaledobjects",
-	})
-	type args struct {
-		scaledObjectName string
-		kedaClient       dynamic.ResourceInterface
-	}
-	tests := []struct {
-		name        string
-		args        args
-		wantVersion string
-		wantErr     bool
-	}{
-		{"Valid Resource", args{"test-1", dynamicResourceClient}, "12345", false},
-		{"Invalid Resource", args{"test-2", dynamicResourceClient}, "", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotVersion, err := getResourceVersion(tt.args.scaledObjectName, tt.args.kedaClient)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getResourceVersion() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if gotVersion != tt.wantVersion {
-				t.Errorf("getResourceVersion() = %v, want %v", gotVersion, tt.wantVersion)
-			}
-		})
-	}
-}
-
 func Test_getAuthTriggerSpec(t *testing.T) {
 
 	// Valid - with Secret
@@ -479,7 +428,7 @@ func Test_getAuthTriggerSpec(t *testing.T) {
 	}
 
 	kubeClient := fake.NewSimpleClientset()
-	_, err := kubeClient.CoreV1().Secrets(namespace).Create(secret)
+	_, err := kubeClient.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	if err != nil {
 		assert.Equal(t, nil, err)
 	}

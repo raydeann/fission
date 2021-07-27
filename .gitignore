@@ -5,6 +5,7 @@ cmd/fission-cli/fission-cli
 cmd/fetcher/fetcher
 cmd/builder/builder
 cmd/preupgradechecks/pre-upgrade-checks
+cmd/reporter/reporter
 
 # Logs
 test/logs/
@@ -28,7 +29,5 @@ environments/php7/vendor/
 .DS_Store
 vendor/
 local/
-environments/dotnet20/Builder/.vs/
-environments/dotnet20/.vs/
-environments/dotnet20/obj/
-environments/dotnet20/bin/
+
+build/

@@ -212,7 +212,6 @@ func (kafka Kafka) getTLSConfig() (*tls.Config, error) {
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(kafka.authKeys["caCert"])
 	tlsConfig.RootCAs = caCertPool
-	tlsConfig.BuildNameToCertificate()
 
 	return &tlsConfig, nil
 }
@@ -316,14 +315,14 @@ func kafkaMsgHandler(kafka *Kafka, producer sarama.SyncProducer, trigger *fv1.Me
 		zap.String("body", string(body)))
 
 	if err != nil {
-		errorString := string("request body error: " + string(body))
+		errorString := "request body error: " + string(body)
 		errorHeaders := generateErrorHeaders(errorString)
 		errorHandler(kafka.logger, trigger, producer, url,
 			errors.Wrapf(err, errorString), errorHeaders)
 		return
 	}
 	if resp.StatusCode != 200 {
-		errorString := string("request returned failure: " + string(resp.StatusCode))
+		errorString := fmt.Sprintf("request returned failure: %v, request body error: %v", resp.StatusCode, body)
 		errorHeaders := generateErrorHeaders(errorString)
 		errorHandler(kafka.logger, trigger, producer, url,
 			fmt.Errorf("request returned failure: %v", resp.StatusCode), errorHeaders)

@@ -28,13 +28,12 @@ import (
 	"go.uber.org/zap"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	k8sCache "k8s.io/client-go/tools/cache"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	"github.com/fission/fission/pkg/crd"
+	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 )
 
 const (
@@ -45,14 +44,12 @@ type canaryConfigMgr struct {
 	logger                 *zap.Logger
 	fissionClient          *crd.FissionClient
 	kubeClient             *kubernetes.Clientset
-	canaryConfigStore      k8sCache.Store
-	canaryConfigController k8sCache.Controller
+	canaryConfigInformer   *k8sCache.SharedIndexInformer
 	promClient             *PrometheusApiClient
-	crdClient              rest.Interface
 	canaryCfgCancelFuncMap *canaryConfigCancelFuncMap
 }
 
-func MakeCanaryConfigMgr(logger *zap.Logger, fissionClient *crd.FissionClient, kubeClient *kubernetes.Clientset, crdClient rest.Interface, prometheusSvc string) (*canaryConfigMgr, error) {
+func MakeCanaryConfigMgr(logger *zap.Logger, fissionClient *crd.FissionClient, kubeClient *kubernetes.Clientset, prometheusSvc string) (*canaryConfigMgr, error) {
 	if prometheusSvc == "" {
 		logger.Info("try to retrieve prometheus server information from environment variables")
 
@@ -92,54 +89,48 @@ func MakeCanaryConfigMgr(logger *zap.Logger, fissionClient *crd.FissionClient, k
 		logger:                 logger.Named("canary_config_manager"),
 		fissionClient:          fissionClient,
 		kubeClient:             kubeClient,
-		crdClient:              crdClient,
 		promClient:             promClient,
 		canaryCfgCancelFuncMap: makecanaryConfigCancelFuncMap(),
 	}
 
-	store, controller := configMgr.initCanaryConfigController()
-	configMgr.canaryConfigStore = store
-	configMgr.canaryConfigController = controller
-
+	informerFactory := genInformer.NewSharedInformerFactory(fissionClient, time.Second*30)
+	informer := informerFactory.Core().V1().CanaryConfigs().Informer()
+	configMgr.canaryConfigInformer = &informer
+	configMgr.CanaryConfigEventHandlers()
 	return configMgr, nil
 }
 
-func (canaryCfgMgr *canaryConfigMgr) initCanaryConfigController() (k8sCache.Store, k8sCache.Controller) {
-	resyncPeriod := 30 * time.Second
-	listWatch := k8sCache.NewListWatchFromClient(canaryCfgMgr.crdClient, "canaryconfigs", metav1.NamespaceAll, fields.Everything())
-	store, controller := k8sCache.NewInformer(listWatch, &fv1.CanaryConfig{}, resyncPeriod,
-		k8sCache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				canaryConfig := obj.(*fv1.CanaryConfig)
-				if canaryConfig.Status.Status == fv1.CanaryConfigStatusPending {
-					go canaryCfgMgr.addCanaryConfig(canaryConfig)
-				}
-			},
-			DeleteFunc: func(obj interface{}) {
-				canaryConfig := obj.(*fv1.CanaryConfig)
-				go canaryCfgMgr.deleteCanaryConfig(canaryConfig)
-			},
-			UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-				oldConfig := oldObj.(*fv1.CanaryConfig)
-				newConfig := newObj.(*fv1.CanaryConfig)
-				if oldConfig.ObjectMeta.ResourceVersion != newConfig.ObjectMeta.ResourceVersion &&
-					newConfig.Status.Status == fv1.CanaryConfigStatusPending {
-					canaryCfgMgr.logger.Info("update canary config invoked",
-						zap.String("name", newConfig.ObjectMeta.Name),
-						zap.String("namespace", newConfig.ObjectMeta.Namespace),
-						zap.String("version", newConfig.ObjectMeta.ResourceVersion))
-					go canaryCfgMgr.updateCanaryConfig(oldConfig, newConfig)
-				}
-				go canaryCfgMgr.reSyncCanaryConfigs()
+func (canaryCfgMgr *canaryConfigMgr) CanaryConfigEventHandlers() {
+	(*canaryCfgMgr.canaryConfigInformer).AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			canaryConfig := obj.(*fv1.CanaryConfig)
+			if canaryConfig.Status.Status == fv1.CanaryConfigStatusPending {
+				go canaryCfgMgr.addCanaryConfig(canaryConfig)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			canaryConfig := obj.(*fv1.CanaryConfig)
+			go canaryCfgMgr.deleteCanaryConfig(canaryConfig)
+		},
+		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
+			oldConfig := oldObj.(*fv1.CanaryConfig)
+			newConfig := newObj.(*fv1.CanaryConfig)
+			if oldConfig.ObjectMeta.ResourceVersion != newConfig.ObjectMeta.ResourceVersion &&
+				newConfig.Status.Status == fv1.CanaryConfigStatusPending {
+				canaryCfgMgr.logger.Info("update canary config invoked",
+					zap.String("name", newConfig.ObjectMeta.Name),
+					zap.String("namespace", newConfig.ObjectMeta.Namespace),
+					zap.String("version", newConfig.ObjectMeta.ResourceVersion))
+				go canaryCfgMgr.updateCanaryConfig(oldConfig, newConfig)
+			}
+			go canaryCfgMgr.reSyncCanaryConfigs()
 
-			},
-		})
-
-	return store, controller
+		},
+	})
 }
 
 func (canaryCfgMgr *canaryConfigMgr) Run(ctx context.Context) {
-	go canaryCfgMgr.canaryConfigController.Run(ctx.Done())
+	go (*canaryCfgMgr.canaryConfigInformer).Run(ctx.Done())
 	canaryCfgMgr.logger.Info("started canary configmgr controller")
 }
 
@@ -242,7 +233,7 @@ func (canaryCfgMgr *canaryConfigMgr) RollForwardOrBack(canaryConfig *fv1.CanaryC
 	}
 
 	// get the http trigger object associated with this canary config
-	triggerObj, err := canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(canaryConfig.ObjectMeta.Namespace).Get(canaryConfig.Spec.Trigger, metav1.GetOptions{})
+	triggerObj, err := canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(canaryConfig.ObjectMeta.Namespace).Get(context.TODO(), canaryConfig.Spec.Trigger, metav1.GetOptions{})
 	if err != nil {
 		// if the http trigger is not found, then give up processing this config.
 		if k8serrors.IsNotFound(err) {
@@ -276,9 +267,27 @@ func (canaryCfgMgr *canaryConfigMgr) RollForwardOrBack(canaryConfig *fv1.CanaryC
 
 	if triggerObj.Spec.FunctionReference.Type == fv1.FunctionReferenceTypeFunctionWeights &&
 		triggerObj.Spec.FunctionReference.FunctionWeights[canaryConfig.Spec.NewFunction] != 0 {
-		failurePercent, err := canaryCfgMgr.promClient.GetFunctionFailurePercentage(triggerObj.Spec.RelativeURL, triggerObj.Spec.Method,
+		var urlPath string
+		if triggerObj.Spec.Prefix != nil && *triggerObj.Spec.Prefix != "" {
+			urlPath = *triggerObj.Spec.Prefix
+		} else {
+			urlPath = triggerObj.Spec.RelativeURL
+		}
+		methods := triggerObj.Spec.Methods
+		if len(triggerObj.Spec.Method) > 0 {
+			present := false
+			for _, m := range triggerObj.Spec.Methods {
+				if m == triggerObj.Spec.Method {
+					present = true
+					break
+				}
+			}
+			if !present {
+				methods = append(methods, triggerObj.Spec.Method)
+			}
+		}
+		failurePercent, err := canaryCfgMgr.promClient.GetFunctionFailurePercentage(urlPath, methods,
 			canaryConfig.Spec.NewFunction, canaryConfig.ObjectMeta.Namespace, canaryConfig.Spec.WeightIncrementDuration)
-
 		if err != nil {
 			// silently ignore. wait for next window to increment weight
 			canaryCfgMgr.logger.Error("error calculating failure percentage",
@@ -298,7 +307,7 @@ func (canaryCfgMgr *canaryConfigMgr) RollForwardOrBack(canaryConfig *fv1.CanaryC
 		if failurePercent == -1 {
 			// this means there were no requests triggered to this url during this window. return here and check back
 			// during next iteration
-			canaryCfgMgr.logger.Info("total requests received for url is 0", zap.String("url", triggerObj.Spec.RelativeURL))
+			canaryCfgMgr.logger.Info("total requests received for url is 0", zap.String("url", urlPath))
 			return
 		}
 
@@ -361,7 +370,7 @@ func (canaryCfgMgr *canaryConfigMgr) RollForwardOrBack(canaryConfig *fv1.CanaryC
 
 func (canaryCfgMgr *canaryConfigMgr) updateHttpTriggerWithRetries(triggerName, triggerNamespace string, fnWeights map[string]int) (err error) {
 	for i := 0; i < maxRetries; i++ {
-		triggerObj, err := canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(triggerNamespace).Get(triggerName, metav1.GetOptions{})
+		triggerObj, err := canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(triggerNamespace).Get(context.TODO(), triggerName, metav1.GetOptions{})
 		if err != nil {
 			e := "error getting http trigger object"
 			canaryCfgMgr.logger.Error(e, zap.Error(err), zap.String("trigger_name", triggerName), zap.String("trigger_namespace", triggerNamespace))
@@ -370,7 +379,7 @@ func (canaryCfgMgr *canaryConfigMgr) updateHttpTriggerWithRetries(triggerName, t
 
 		triggerObj.Spec.FunctionReference.FunctionWeights = fnWeights
 
-		_, err = canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(triggerNamespace).Update(triggerObj)
+		_, err = canaryCfgMgr.fissionClient.CoreV1().HTTPTriggers(triggerNamespace).Update(context.TODO(), triggerObj, metav1.UpdateOptions{})
 		switch {
 		case err == nil:
 			canaryCfgMgr.logger.Debug("updated http trigger", zap.String("trigger_name", triggerName), zap.String("trigger_namespace", triggerNamespace))
@@ -396,7 +405,7 @@ func (canaryCfgMgr *canaryConfigMgr) updateHttpTriggerWithRetries(triggerName, t
 
 func (canaryCfgMgr *canaryConfigMgr) updateCanaryConfigStatusWithRetries(cfgName, cfgNamespace string, status string) (err error) {
 	for i := 0; i < maxRetries; i++ {
-		canaryCfgObj, err := canaryCfgMgr.fissionClient.CoreV1().CanaryConfigs(cfgNamespace).Get(cfgName, metav1.GetOptions{})
+		canaryCfgObj, err := canaryCfgMgr.fissionClient.CoreV1().CanaryConfigs(cfgNamespace).Get(context.TODO(), cfgName, metav1.GetOptions{})
 		if err != nil {
 			e := "error getting http canary config object"
 			canaryCfgMgr.logger.Error(e,
@@ -414,7 +423,7 @@ func (canaryCfgMgr *canaryConfigMgr) updateCanaryConfigStatusWithRetries(cfgName
 
 		canaryCfgObj.Status.Status = status
 
-		_, err = canaryCfgMgr.fissionClient.CoreV1().CanaryConfigs(cfgNamespace).Update(canaryCfgObj)
+		_, err = canaryCfgMgr.fissionClient.CoreV1().CanaryConfigs(cfgNamespace).Update(context.TODO(), canaryCfgObj, metav1.UpdateOptions{})
 		switch {
 		case err == nil:
 			canaryCfgMgr.logger.Info("updated canary config",
@@ -483,7 +492,7 @@ func (canaryCfgMgr *canaryConfigMgr) rollForward(canaryConfig *fv1.CanaryConfig,
 }
 
 func (canaryCfgMgr *canaryConfigMgr) reSyncCanaryConfigs() {
-	for _, obj := range canaryCfgMgr.canaryConfigStore.List() {
+	for _, obj := range (*canaryCfgMgr.canaryConfigInformer).GetStore().List() {
 		canaryConfig := obj.(*fv1.CanaryConfig)
 		_, err := canaryCfgMgr.canaryCfgCancelFuncMap.lookup(&canaryConfig.ObjectMeta)
 		if err != nil && canaryConfig.Status.Status == fv1.CanaryConfigStatusPending {

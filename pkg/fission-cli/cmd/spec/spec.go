@@ -361,38 +361,40 @@ func (fr *FissionResources) Validate(input cli.Input) ([]string, error) {
 	for _, f := range fr.Functions {
 		functions[MapKey(&f.ObjectMeta)] = false
 
-		pkgMeta := &metav1.ObjectMeta{
-			Name:      f.Spec.Package.PackageRef.Name,
-			Namespace: f.Spec.Package.PackageRef.Namespace,
-		}
+		if f.Spec.InvokeStrategy.ExecutionStrategy.ExecutorType != fv1.ExecutorTypeContainer {
+			pkgMeta := &metav1.ObjectMeta{
+				Name:      f.Spec.Package.PackageRef.Name,
+				Namespace: f.Spec.Package.PackageRef.Namespace,
+			}
 
-		// check package ref from function
-		packageRefExists := func() bool {
-			_, ok := packages[MapKey(pkgMeta)]
-			return ok
-		}
+			// check package ref from function
+			packageRefExists := func() bool {
+				_, ok := packages[MapKey(pkgMeta)]
+				return ok
+			}
 
-		// check that the package referenced by each function is in the same ns as the function
-		packageRefInFuncNs := func(f *fv1.Function) bool {
-			return f.Spec.Package.PackageRef.Namespace == f.ObjectMeta.Namespace
-		}
+			// check that the package referenced by each function is in the same ns as the function
+			packageRefInFuncNs := func(f *fv1.Function) bool {
+				return f.Spec.Package.PackageRef.Namespace == f.ObjectMeta.Namespace
+			}
 
-		if !packageRefInFuncNs(&f) {
-			result = multierror.Append(result, fmt.Errorf(
-				"%v: function '%v' references a package outside of its namespace %v/%v",
-				fr.SourceMap.Locations["Function"][f.ObjectMeta.Namespace][f.ObjectMeta.Name],
-				f.ObjectMeta.Name,
-				f.Spec.Package.PackageRef.Namespace,
-				f.Spec.Package.PackageRef.Name))
-		} else if !packageRefExists() {
-			result = multierror.Append(result, fmt.Errorf(
-				"%v: function '%v' references unknown package %v/%v",
-				fr.SourceMap.Locations["Function"][f.ObjectMeta.Namespace][f.ObjectMeta.Name],
-				f.ObjectMeta.Name,
-				pkgMeta.Namespace,
-				pkgMeta.Name))
-		} else {
-			packages[MapKey(pkgMeta)] = true
+			if !packageRefInFuncNs(&f) {
+				result = multierror.Append(result, fmt.Errorf(
+					"%v: function '%v' references a package outside of its namespace %v/%v",
+					fr.SourceMap.Locations["Function"][f.ObjectMeta.Namespace][f.ObjectMeta.Name],
+					f.ObjectMeta.Name,
+					f.Spec.Package.PackageRef.Namespace,
+					f.Spec.Package.PackageRef.Name))
+			} else if !packageRefExists() {
+				result = multierror.Append(result, fmt.Errorf(
+					"%v: function '%v' references unknown package %v/%v",
+					fr.SourceMap.Locations["Function"][f.ObjectMeta.Namespace][f.ObjectMeta.Name],
+					f.ObjectMeta.Name,
+					pkgMeta.Namespace,
+					pkgMeta.Name))
+			} else {
+				packages[MapKey(pkgMeta)] = true
+			}
 		}
 
 		client, err := util.GetServer(input)
@@ -442,6 +444,9 @@ func (fr *FissionResources) Validate(input cli.Input) ([]string, error) {
 
 		if len(t.Spec.Host) > 0 {
 			warnings = append(warnings, "Host in HTTPTrigger spec.Host is now marked as deprecated, see 'help' for details")
+		}
+		if len(t.Spec.Method) > 0 {
+			warnings = append(warnings, "Method in HTTTPTrigger spec.Method is deprecated, use spec.Methods instead")
 		}
 		result = multierror.Append(result, t.Validate())
 	}
@@ -564,11 +569,6 @@ func (fr *FissionResources) ParseYaml(b []byte, loc *Location) error {
 		err = yaml.Unmarshal(b, &v)
 		if err != nil {
 			return errors.Wrap(err, fmt.Sprintf("Failed to parse %v in %v", tm.Kind, loc))
-		}
-
-		// TODO move to validator
-		if !strings.HasPrefix(v.Spec.RelativeURL, "/") {
-			v.Spec.RelativeURL = fmt.Sprintf("/%s", v.Spec.RelativeURL)
 		}
 
 		m = &v.ObjectMeta

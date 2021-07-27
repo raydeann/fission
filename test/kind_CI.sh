@@ -17,8 +17,8 @@ dump_system_info
 export FUNCTION_NAMESPACE=fission-function
 export FISSION_NAMESPACE=fission
 export FISSION_ROUTER=127.0.0.1:8888
-export NODE_RUNTIME_IMAGE=fission/node-env-12.16:1.11.0
-export NODE_BUILDER_IMAGE=fission/node-builder-12.16:1.11.0
+export NODE_RUNTIME_IMAGE=fission/node-env-12.16
+export NODE_BUILDER_IMAGE=fission/node-builder-12.16
 export PYTHON_RUNTIME_IMAGE=fission/python-env
 export PYTHON_BUILDER_IMAGE=fission/python-builder
 export GO_RUNTIME_IMAGE=fission/go-env-1.12
@@ -53,7 +53,7 @@ echo "Successfully pull env and builder images"
 export FAILURES=0
 main() {
     set +e
-    export TIMEOUT=1000  # 15 minutes per test 
+    export TIMEOUT=1200  # 20 minutes per test
     # run tests without newdeploy in parallel.
     export JOBS=6
     source $ROOT/test/run_test.sh \
@@ -84,7 +84,8 @@ main() {
         $ROOT/test/tests/mqtrigger/nats/test_mqtrigger.sh \
         $ROOT/test/tests/mqtrigger/nats/test_mqtrigger_error.sh \
         $ROOT/test/tests/test_huge_response/test_huge_response.sh \
-        $ROOT/test/tests/test_kubectl/test_kubectl.sh
+        $ROOT/test/tests/test_kubectl/test_kubectl.sh \
+        $ROOT/test/tests/websocket/test_ws.sh
 
     export JOBS=3
     source $ROOT/test/run_test.sh \

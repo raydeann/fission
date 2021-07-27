@@ -35,14 +35,15 @@ func Commands() *cobra.Command {
 			flag.FnEnvName, flag.FnEntryPoint, flag.FnPkgName,
 			flag.FnExecutorType, flag.FnCfgMap, flag.FnSecret,
 			flag.FnSpecializationTimeout, flag.FnExecutionTimeout,
-			flag.FnIdleTimeout, flag.FnConcurrency,
+			flag.FnIdleTimeout, flag.FnConcurrency, flag.FnRequestsPerPod,
+			flag.FnOnceOnly, flag.Labels, flag.Annotation,
 
 			// TODO retired pkg & trigger related flags from function cmd
 			flag.PkgCode, flag.PkgSrcArchive, flag.PkgDeployArchive,
 			flag.PkgSrcChecksum, flag.PkgDeployChecksum, flag.PkgInsecure,
 			flag.FnBuildCmd,
 
-			flag.HtUrl, flag.HtMethod,
+			flag.HtUrl, flag.HtPrefix, flag.HtMethod,
 
 			// flag for newdeploy to use.
 			flag.RunTimeMinCPU, flag.RunTimeMaxCPU, flag.RunTimeMinMemory,
@@ -86,7 +87,8 @@ func Commands() *cobra.Command {
 			flag.FnEnvName, flag.FnEntryPoint, flag.FnPkgName,
 			flag.FnExecutorType, flag.FnSecret, flag.FnCfgMap,
 			flag.FnSpecializationTimeout, flag.FnExecutionTimeout,
-			flag.FnIdleTimeout, flag.FnConcurrency,
+			flag.FnIdleTimeout, flag.FnConcurrency, flag.FnRequestsPerPod,
+			flag.FnOnceOnly, flag.Labels, flag.Annotation,
 
 			flag.PkgCode, flag.PkgSrcArchive, flag.PkgDeployArchive,
 			flag.PkgSrcChecksum, flag.PkgDeployChecksum, flag.PkgInsecure,
@@ -148,6 +150,54 @@ func Commands() *cobra.Command {
 			// for getting log from log database if
 			// we failed to get logs from function pod.
 			flag.FnLogDBType,
+			flag.FnSubPath,
+		},
+	})
+
+	runContainerCmd := &cobra.Command{
+		Use:     "run-container",
+		Aliases: []string{"runc"},
+		Short:   "Alpha: Run a container image as a function",
+		RunE:    wrapper.Wrapper(RunContainer),
+	}
+	wrapper.SetFlags(runContainerCmd, flag.FlagSet{
+		Required: []flag.Flag{flag.FnName, flag.FnImageName},
+		Optional: []flag.Flag{
+			flag.FnPort, flag.FnCommand, flag.FnArgs,
+			flag.FnCfgMap, flag.FnSecret,
+			flag.FnExecutionTimeout,
+			flag.FnIdleTimeout,
+			flag.Labels, flag.Annotation,
+
+			// flag for newdeploy to use.
+			flag.RunTimeMinCPU, flag.RunTimeMaxCPU, flag.RunTimeMinMemory,
+			flag.RunTimeMaxMemory, flag.ReplicasMin,
+			flag.ReplicasMax, flag.RunTimeTargetCPU,
+
+			flag.NamespaceFunction, flag.SpecSave, flag.SpecDry,
+		},
+	})
+
+	updateContainerCmd := &cobra.Command{
+		Use:     "update-container",
+		Aliases: []string{"updatec"},
+		Short:   "Alpha: Update a function running a container",
+		RunE:    wrapper.Wrapper(UpdateContainer),
+	}
+	wrapper.SetFlags(updateContainerCmd, flag.FlagSet{
+		Required: []flag.Flag{flag.FnName},
+		Optional: []flag.Flag{
+			flag.FnImageName, flag.FnPort,
+			flag.FnCommand, flag.FnArgs,
+			flag.FnSecret, flag.FnCfgMap,
+			flag.FnExecutionTimeout, flag.FnIdleTimeout,
+			flag.Labels, flag.Annotation,
+
+			flag.RunTimeMinCPU, flag.RunTimeMaxCPU, flag.RunTimeMinMemory,
+			flag.RunTimeMaxMemory, flag.ReplicasMin, flag.ReplicasMax,
+			flag.RunTimeTargetCPU,
+
+			flag.NamespaceFunction, flag.SpecSave,
 		},
 	})
 
@@ -156,8 +206,8 @@ func Commands() *cobra.Command {
 		Aliases: []string{"fn"},
 		Short:   "Create, update and manage functions",
 	}
-
-	command.AddCommand(createCmd, getCmd, getmetaCmd, updateCmd, deleteCmd, listCmd, logsCmd, testCmd)
+	command.AddCommand(createCmd, getCmd, getmetaCmd, updateCmd, deleteCmd, listCmd, logsCmd, testCmd,
+		runContainerCmd, updateContainerCmd)
 
 	return command
 }

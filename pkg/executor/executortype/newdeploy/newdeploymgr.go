@@ -28,15 +28,14 @@ import (
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
+	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apiv1 "k8s.io/api/core/v1"
 	k8sErrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	k8sCache "k8s.io/client-go/tools/cache"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
@@ -47,6 +46,7 @@ import (
 	fetcherConfig "github.com/fission/fission/pkg/fetcher/config"
 	"github.com/fission/fission/pkg/throttler"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/maps"
 )
 
 var _ executortype.ExecutorType = &NewDeploy{}
@@ -58,7 +58,6 @@ type (
 
 		kubernetesClient *kubernetes.Clientset
 		fissionClient    *crd.FissionClient
-		crdClient        rest.Interface
 		instanceID       string
 		fetcherConfig    *fetcherConfig.Config
 
@@ -68,12 +67,13 @@ type (
 
 		fsCache *fscache.FunctionServiceCache // cache funcSvc's by function, address and pod name
 
-		throttler      *throttler.Throttler
-		funcStore      k8sCache.Store
-		funcController k8sCache.Controller
+		throttler *throttler.Throttler
 
-		envStore      k8sCache.Store
-		envController k8sCache.Controller
+		funcInformer *k8sCache.SharedIndexInformer
+		envInformer  *k8sCache.SharedIndexInformer
+
+		serviceInformer    k8sCache.SharedIndexInformer
+		deploymentInformer k8sCache.SharedIndexInformer
 
 		defaultIdlePodReapTime time.Duration
 	}
@@ -84,11 +84,12 @@ func MakeNewDeploy(
 	logger *zap.Logger,
 	fissionClient *crd.FissionClient,
 	kubernetesClient *kubernetes.Clientset,
-	crdClient rest.Interface,
 	namespace string,
 	fetcherConfig *fetcherConfig.Config,
 	instanceID string,
-) executortype.ExecutorType {
+	funcInformer *k8sCache.SharedIndexInformer,
+	envInformer *k8sCache.SharedIndexInformer,
+) (executortype.ExecutorType, error) {
 	enableIstio := false
 	if len(os.Getenv("ENABLE_ISTIO")) > 0 {
 		istio, err := strconv.ParseBool(os.Getenv("ENABLE_ISTIO"))
@@ -103,7 +104,6 @@ func MakeNewDeploy(
 
 		fissionClient:    fissionClient,
 		kubernetesClient: kubernetesClient,
-		crdClient:        crdClient,
 		instanceID:       instanceID,
 
 		namespace: namespace,
@@ -115,25 +115,26 @@ func MakeNewDeploy(
 		useIstio:               enableIstio,
 
 		defaultIdlePodReapTime: 2 * time.Minute,
+		funcInformer:           funcInformer,
+		envInformer:            envInformer,
 	}
 
-	if nd.crdClient != nil {
-		fnStore, fnController := nd.initFuncController()
-		nd.funcStore = fnStore
-		nd.funcController = fnController
+	(*nd.funcInformer).AddEventHandler(nd.FunctionEventHandlers())
+	(*nd.envInformer).AddEventHandler(nd.EnvEventHandlers())
 
-		envStore, envController := nd.initEnvController()
-		nd.envStore = envStore
-		nd.envController = envController
+	informerFactory, err := utils.GetInformerFactoryByExecutor(nd.kubernetesClient, fv1.ExecutorTypePoolmgr)
+	if err != nil {
+		return nil, err
 	}
-
-	return nd
+	nd.serviceInformer = informerFactory.Core().V1().Services().Informer()
+	nd.deploymentInformer = informerFactory.Apps().V1().Deployments().Informer()
+	return nd, nil
 }
 
 // Run start the function and environment controller along with an object reaper.
 func (deploy *NewDeploy) Run(ctx context.Context) {
-	go deploy.funcController.Run(ctx.Done())
-	go deploy.envController.Run(ctx.Done())
+	go deploy.serviceInformer.Run(ctx.Done())
+	go deploy.deploymentInformer.Run(ctx.Done())
 	go deploy.idleObjectReaper()
 }
 
@@ -165,10 +166,10 @@ func (deploy *NewDeploy) UnTapService(key string, svcHost string) {
 	// Not Implemented for NewDeployment. Will be used when support of concurrent specialization of same function is added.
 }
 
-// GetTotalAvailable has not been implemented for NewDeployment.
-func (deploy *NewDeploy) GetTotalAvailable(fn *fv1.Function) int {
+// GetFuncSvcFromPoolCache has not been implemented for NewDeployment
+func (deploy *NewDeploy) GetFuncSvcFromPoolCache(fn *fv1.Function, requestsPerPod int) (*fscache.FuncSvc, int, error) {
 	// Not Implemented for NewDeployment. Will be used when support of concurrent specialization of same function is added.
-	return 0
+	return nil, 0, nil
 }
 
 // TapService makes a TouchByAddress request to the cache.
@@ -180,50 +181,82 @@ func (deploy *NewDeploy) TapService(svcHost string) error {
 	return nil
 }
 
+func (deploy *NewDeploy) getServiceInfo(obj apiv1.ObjectReference) (*apiv1.Service, error) {
+	item, exists, err := utils.GetCachedItem(obj, deploy.serviceInformer)
+
+	if err != nil || !exists {
+		deploy.logger.Debug(
+			"Falling back to getting service info from k8s API -- this may cause performance issues for your function.",
+			zap.Bool("exists", exists),
+			zap.Error(err),
+		)
+		service, err := deploy.kubernetesClient.CoreV1().Services(obj.Namespace).Get(context.TODO(), obj.Name, metav1.GetOptions{})
+		return service, err
+	}
+
+	service := item.(*apiv1.Service)
+	return service, nil
+}
+
+func (deploy *NewDeploy) getDeploymentInfo(obj apiv1.ObjectReference) (*appsv1.Deployment, error) {
+	item, exists, err := utils.GetCachedItem(obj, deploy.deploymentInformer)
+
+	if err != nil || !exists {
+		deploy.logger.Debug(
+			"Falling back to getting deployment info from k8s API -- this may cause performance issues for your function.",
+			zap.Bool("exists", exists),
+			zap.Error(err),
+		)
+		deployment, err := deploy.kubernetesClient.AppsV1().Deployments(obj.Namespace).Get(context.TODO(), obj.Name, metav1.GetOptions{})
+		return deployment, err
+	}
+
+	deployment := item.(*appsv1.Deployment)
+	return deployment, nil
+}
+
 // IsValid does a get on the service address to ensure it's a valid service, then
 // scale deployment to 1 replica if there are no available replicas for function.
 // Return true if no error occurs, return false otherwise.
 func (deploy *NewDeploy) IsValid(fsvc *fscache.FuncSvc) bool {
-	service := strings.Split(fsvc.Address, ".")
-	if len(service) == 0 {
+	if len(strings.Split(fsvc.Address, ".")) == 0 {
+		deploy.logger.Error("address not found in function service")
 		return false
 	}
+	if len(fsvc.KubernetesObjects) == 0 {
+		deploy.logger.Error("no kubernetes object related to function", zap.String("function", fsvc.Function.Name))
+		return false
+	}
+	for _, obj := range fsvc.KubernetesObjects {
+		if strings.ToLower(obj.Kind) == "service" {
+			_, err := deploy.getServiceInfo(obj)
+			if err != nil {
+				if !k8sErrs.IsNotFound(err) {
+					deploy.logger.Error("error validating function service", zap.String("function", fsvc.Function.Name), zap.Error(err))
+				}
+				return false
+			}
 
-	_, err := deploy.kubernetesClient.CoreV1().Services(service[1]).Get(service[0], metav1.GetOptions{})
-	if err != nil {
-		if !k8sErrs.IsNotFound(err) {
-			deploy.logger.Error("error validating function service address", zap.String("function", fsvc.Function.Name), zap.Error(err))
+		} else if strings.ToLower(obj.Kind) == "deployment" {
+			currentDeploy, err := deploy.getDeploymentInfo(obj)
+			if err != nil {
+				if !k8sErrs.IsNotFound(err) {
+					deploy.logger.Error("error validating function deployment", zap.String("function", fsvc.Function.Name), zap.Error(err))
+				}
+				return false
+			}
+			if currentDeploy.Status.AvailableReplicas < 1 {
+				return false
+			}
 		}
-		return false
 	}
-
-	deployObj := getDeploymentObj(fsvc.KubernetesObjects)
-	if deployObj == nil {
-		deploy.logger.Error("deployment obj for function does not exist", zap.String("function", fsvc.Function.Name))
-		return false
-	}
-
-	currentDeploy, err := deploy.kubernetesClient.AppsV1().
-		Deployments(deployObj.Namespace).Get(deployObj.Name, metav1.GetOptions{})
-	if err != nil {
-		if !k8sErrs.IsNotFound(err) {
-			deploy.logger.Error("error validating function deployment", zap.Error(err), zap.String("function", fsvc.Function.Name))
-		}
-		return false
-	}
-
-	// return directly when available replicas > 0
-	if currentDeploy.Status.AvailableReplicas > 0 {
-		return true
-	}
-
-	return false
+	return true
 }
 
-// RefreshFuncPods deleted pods related to the function so that new pods are replenished
+// RefreshFuncPods deletes pods related to the function so that new pods are replenished
 func (deploy *NewDeploy) RefreshFuncPods(logger *zap.Logger, f fv1.Function) error {
 
-	env, err := deploy.fissionClient.CoreV1().Environments(f.Spec.Environment.Namespace).Get(f.Spec.Environment.Name, metav1.GetOptions{})
+	env, err := deploy.fissionClient.CoreV1().Environments(f.Spec.Environment.Namespace).Get(context.TODO(), f.Spec.Environment.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -234,7 +267,7 @@ func (deploy *NewDeploy) RefreshFuncPods(logger *zap.Logger, f fv1.Function) err
 		UID:       env.ObjectMeta.UID,
 	})
 
-	dep, err := deploy.kubernetesClient.AppsV1().Deployments(metav1.NamespaceAll).List(metav1.ListOptions{
+	dep, err := deploy.kubernetesClient.AppsV1().Deployments(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.Set(funcLabels).AsSelector().String(),
 	})
 
@@ -252,9 +285,9 @@ func (deploy *NewDeploy) RefreshFuncPods(logger *zap.Logger, f fv1.Function) err
 		patch := fmt.Sprintf(`{"spec" : {"template": {"spec":{"containers":[{"name": "%s", "env":[{"name": "%s", "value": "%v"}]}]}}}}`,
 			f.ObjectMeta.Name, fv1.ResourceVersionCount, rvCount)
 
-		_, err = deploy.kubernetesClient.AppsV1().Deployments(deployment.ObjectMeta.Namespace).Patch(deployment.ObjectMeta.Name,
+		_, err = deploy.kubernetesClient.AppsV1().Deployments(deployment.ObjectMeta.Namespace).Patch(context.TODO(), deployment.ObjectMeta.Name,
 			k8sTypes.StrategicMergePatchType,
-			[]byte(patch))
+			[]byte(patch), metav1.PatchOptions{})
 		if err != nil {
 			return err
 		}
@@ -264,7 +297,7 @@ func (deploy *NewDeploy) RefreshFuncPods(logger *zap.Logger, f fv1.Function) err
 
 // AdoptExistingResources attempts to adopt resources for functions in all namespaces.
 func (deploy *NewDeploy) AdoptExistingResources() {
-	fnList, err := deploy.fissionClient.CoreV1().Functions(metav1.NamespaceAll).List(metav1.ListOptions{})
+	fnList, err := deploy.fissionClient.CoreV1().Functions(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		deploy.logger.Error("error getting function list", zap.Error(err))
 		return
@@ -322,87 +355,8 @@ func (deploy *NewDeploy) CleanupOldExecutorObjects() {
 	}
 }
 
-func (deploy *NewDeploy) initFuncController() (k8sCache.Store, k8sCache.Controller) {
-	resyncPeriod := 30 * time.Second
-	listWatch := k8sCache.NewListWatchFromClient(deploy.crdClient, "functions", metav1.NamespaceAll, fields.Everything())
-	store, controller := k8sCache.NewInformer(listWatch, &fv1.Function{}, resyncPeriod, k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			// TODO: A workaround to process items in parallel. We should use workqueue ("k8s.io/client-go/util/workqueue")
-			// and worker pattern to process items instead of moving process to another goroutine.
-			// example: https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/job/job_controller.go
-			go func() {
-				fn := obj.(*fv1.Function)
-				deploy.logger.Debug("create deployment for function", zap.Any("fn", fn.ObjectMeta), zap.Any("fnspec", fn.Spec))
-				_, err := deploy.createFunction(fn)
-				if err != nil {
-					deploy.logger.Error("error eager creating function",
-						zap.Error(err),
-						zap.Any("function", fn))
-				}
-				deploy.logger.Debug("end create deployment for function", zap.Any("fn", fn.ObjectMeta), zap.Any("fnspec", fn.Spec))
-			}()
-		},
-		DeleteFunc: func(obj interface{}) {
-			fn := obj.(*fv1.Function)
-			go func() {
-				err := deploy.deleteFunction(fn)
-				if err != nil {
-					deploy.logger.Error("error deleting function",
-						zap.Error(err),
-						zap.Any("function", fn))
-				}
-			}()
-		},
-		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-			oldFn := oldObj.(*fv1.Function)
-			newFn := newObj.(*fv1.Function)
-			go func() {
-				err := deploy.updateFunction(oldFn, newFn)
-				if err != nil {
-					deploy.logger.Error("error updating function",
-						zap.Error(err),
-						zap.Any("old_function", oldFn),
-						zap.Any("new_function", newFn))
-				}
-			}()
-		},
-	})
-	return store, controller
-}
-
-func (deploy *NewDeploy) initEnvController() (k8sCache.Store, k8sCache.Controller) {
-	resyncPeriod := 30 * time.Second
-	listWatch := k8sCache.NewListWatchFromClient(deploy.crdClient, "environments", metav1.NamespaceAll, fields.Everything())
-	store, controller := k8sCache.NewInformer(listWatch, &fv1.Environment{}, resyncPeriod, k8sCache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) {},
-		DeleteFunc: func(obj interface{}) {},
-		UpdateFunc: func(oldObj interface{}, newObj interface{}) {
-			newEnv := newObj.(*fv1.Environment)
-			oldEnv := oldObj.(*fv1.Environment)
-			// Currently only an image update in environment calls for function's deployment recreation. In future there might be more attributes which would want to do it
-			if oldEnv.Spec.Runtime.Image != newEnv.Spec.Runtime.Image {
-				deploy.logger.Debug("Updating all function of the environment that changed, old env:", zap.Any("environment", oldEnv))
-				funcs := deploy.getEnvFunctions(&newEnv.ObjectMeta)
-				for _, f := range funcs {
-					function, err := deploy.fissionClient.CoreV1().Functions(f.ObjectMeta.Namespace).Get(f.ObjectMeta.Name, metav1.GetOptions{})
-					if err != nil {
-						deploy.logger.Error("Error getting function", zap.Error(err), zap.Any("function", function))
-						continue
-					}
-					err = deploy.updateFuncDeployment(function, newEnv)
-					if err != nil {
-						deploy.logger.Error("Error updating function", zap.Error(err), zap.Any("function", function))
-						continue
-					}
-				}
-			}
-		},
-	})
-	return store, controller
-}
-
 func (deploy *NewDeploy) getEnvFunctions(m *metav1.ObjectMeta) []fv1.Function {
-	funcList, err := deploy.fissionClient.CoreV1().Functions(metav1.NamespaceAll).List(metav1.ListOptions{})
+	funcList, err := deploy.fissionClient.CoreV1().Functions(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		deploy.logger.Error("Error getting functions for env", zap.Error(err), zap.Any("environment", m))
 	}
@@ -456,16 +410,23 @@ func (deploy *NewDeploy) deleteFunction(fn *fv1.Function) error {
 }
 
 func (deploy *NewDeploy) fnCreate(fn *fv1.Function) (*fscache.FuncSvc, error) {
+	cleanupFunc := func(ns string, name string) {
+		err := deploy.cleanupNewdeploy(ns, name)
+		if err != nil {
+			deploy.logger.Error("received error while cleaning function resources",
+				zap.String("namespace", ns), zap.String("name", name))
+		}
+	}
 	env, err := deploy.fissionClient.CoreV1().
 		Environments(fn.Spec.Environment.Namespace).
-		Get(fn.Spec.Environment.Name, metav1.GetOptions{})
+		Get(context.TODO(), fn.Spec.Environment.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	objName := deploy.getObjName(fn)
 	deployLabels := deploy.getDeployLabels(fn.ObjectMeta, env.ObjectMeta)
-	deployAnnotations := deploy.getDeployAnnotations(fn.ObjectMeta)
+	deployAnnotations := deploy.getDeployAnnotations(fn.ObjectMeta, env.ObjectMeta)
 
 	// to support backward compatibility, if the function was created in default ns, we fall back to creating the
 	// deployment of the function in fission-function ns
@@ -482,7 +443,7 @@ func (deploy *NewDeploy) fnCreate(fn *fv1.Function) (*fscache.FuncSvc, error) {
 	svc, err := deploy.createOrGetSvc(deployLabels, deployAnnotations, objName, ns)
 	if err != nil {
 		deploy.logger.Error("error creating service", zap.Error(err), zap.String("service", objName))
-		go deploy.cleanupNewdeploy(ns, objName) //nolint: errcheck
+		go cleanupFunc(ns, objName)
 		return nil, errors.Wrapf(err, "error creating service %v", objName)
 	}
 	svcAddress := fmt.Sprintf("%v.%v", svc.Name, svc.Namespace)
@@ -490,14 +451,14 @@ func (deploy *NewDeploy) fnCreate(fn *fv1.Function) (*fscache.FuncSvc, error) {
 	depl, err := deploy.createOrGetDeployment(fn, env, objName, deployLabels, deployAnnotations, ns)
 	if err != nil {
 		deploy.logger.Error("error creating deployment", zap.Error(err), zap.String("deployment", objName))
-		go deploy.cleanupNewdeploy(ns, objName) //nolint: errcheck
+		go cleanupFunc(ns, objName)
 		return nil, errors.Wrapf(err, "error creating deployment %v", objName)
 	}
 
 	hpa, err := deploy.createOrGetHpa(objName, &fn.Spec.InvokeStrategy.ExecutionStrategy, depl, deployLabels, deployAnnotations)
 	if err != nil {
 		deploy.logger.Error("error creating HPA", zap.Error(err), zap.String("hpa", objName))
-		go deploy.cleanupNewdeploy(ns, objName) //nolint: errcheck
+		go cleanupFunc(ns, objName)
 		return nil, errors.Wrapf(err, "error creating the HPA %v", objName)
 	}
 
@@ -664,7 +625,7 @@ func (deploy *NewDeploy) updateFunction(oldFn *fv1.Function, newFn *fv1.Function
 
 	if deployChanged {
 		env, err := deploy.fissionClient.CoreV1().Environments(newFn.Spec.Environment.Namespace).
-			Get(newFn.Spec.Environment.Name, metav1.GetOptions{})
+			Get(context.TODO(), newFn.Spec.Environment.Name, metav1.GetOptions{})
 		if err != nil {
 			deploy.updateStatus(oldFn, err, "failed to get environment while updating function")
 			return err
@@ -695,7 +656,7 @@ func (deploy *NewDeploy) updateFuncDeployment(fn *fv1.Function, env *fv1.Environ
 		ns = fn.ObjectMeta.Namespace
 	}
 
-	existingDepl, err := deploy.kubernetesClient.AppsV1().Deployments(ns).Get(fnObjName, metav1.GetOptions{})
+	existingDepl, err := deploy.kubernetesClient.AppsV1().Deployments(ns).Get(context.TODO(), fnObjName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -705,7 +666,7 @@ func (deploy *NewDeploy) updateFuncDeployment(fn *fv1.Function, env *fv1.Environ
 	// Therefore, the deployment update will trigger a rolling update.
 	newDeployment, err := deploy.getDeploymentSpec(fn, env,
 		existingDepl.Spec.Replicas, // use current replicas instead of minscale in the ExecutionStrategy.
-		fnObjName, ns, deployLabels, deploy.getDeployAnnotations(fn.ObjectMeta))
+		fnObjName, ns, deployLabels, deploy.getDeployAnnotations(fn.ObjectMeta, env.ObjectMeta))
 	if err != nil {
 		deploy.updateStatus(fn, err, "failed to get new deployment spec while updating function")
 		return err
@@ -759,11 +720,20 @@ func (deploy *NewDeploy) fnDelete(fn *fv1.Function) error {
 func (deploy *NewDeploy) getObjName(fn *fv1.Function) string {
 	// use meta uuid of function, this ensure we always get the same name for the same function.
 	uid := fn.ObjectMeta.UID[len(fn.ObjectMeta.UID)-17:]
-	return strings.ToLower(fmt.Sprintf("newdeploy-%v-%v-%v", fn.ObjectMeta.Name, fn.ObjectMeta.Namespace, uid))
+	var functionMetadata string
+	if len(fn.ObjectMeta.Name)+len(fn.ObjectMeta.Namespace) < 35 {
+		functionMetadata = fn.ObjectMeta.Name + "-" + fn.ObjectMeta.Namespace
+	} else {
+		functionMetadata = fn.ObjectMeta.Name[:17] + "-" + fn.ObjectMeta.Namespace[:17]
+	}
+	// contructed name should be 63 characters long, as it is a valid k8s name
+	// functionMetadata should be 35 characters long, as we take 17 characters from functionUid
+	// with newdeploy 10 character prefix
+	return strings.ToLower(fmt.Sprintf("newdeploy-%s-%s", functionMetadata, uid))
 }
 
 func (deploy *NewDeploy) getDeployLabels(fnMeta metav1.ObjectMeta, envMeta metav1.ObjectMeta) map[string]string {
-	return map[string]string{
+	deployLabels := map[string]string{
 		fv1.EXECUTOR_TYPE:         string(fv1.ExecutorTypeNewdeploy),
 		fv1.ENVIRONMENT_NAME:      envMeta.Name,
 		fv1.ENVIRONMENT_NAMESPACE: envMeta.Namespace,
@@ -772,13 +742,17 @@ func (deploy *NewDeploy) getDeployLabels(fnMeta metav1.ObjectMeta, envMeta metav
 		fv1.FUNCTION_NAMESPACE:    fnMeta.Namespace,
 		fv1.FUNCTION_UID:          string(fnMeta.UID),
 	}
+	for k, v := range envMeta.Labels {
+		deployLabels[k] = v
+	}
+	return deployLabels
 }
 
-func (deploy *NewDeploy) getDeployAnnotations(fnMeta metav1.ObjectMeta) map[string]string {
-	return map[string]string{
-		fv1.EXECUTOR_INSTANCEID_LABEL: deploy.instanceID,
-		fv1.FUNCTION_RESOURCE_VERSION: fnMeta.ResourceVersion,
-	}
+func (deploy *NewDeploy) getDeployAnnotations(fnMeta metav1.ObjectMeta, envMeta metav1.ObjectMeta) map[string]string {
+	deployAnnotations := maps.CopyStringMap(envMeta.Annotations)
+	deployAnnotations[fv1.EXECUTOR_INSTANCEID_LABEL] = deploy.instanceID
+	deployAnnotations[fv1.FUNCTION_RESOURCE_VERSION] = fnMeta.ResourceVersion
+	return deployAnnotations
 }
 
 // updateStatus is a function which updates status of update.
@@ -794,7 +768,7 @@ func (deploy *NewDeploy) idleObjectReaper() {
 	for {
 		time.Sleep(pollSleep)
 
-		envs, err := deploy.fissionClient.CoreV1().Environments(metav1.NamespaceAll).List(metav1.ListOptions{})
+		envs, err := deploy.fissionClient.CoreV1().Environments(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			deploy.logger.Fatal("failed to get environment list", zap.Error(err))
 		}
@@ -820,12 +794,12 @@ func (deploy *NewDeploy) idleObjectReaper() {
 			// For function with the environment that no longer exists, executor
 			// scales down the deployment as usual and prints log to notify user.
 			if _, ok := envList[fsvc.Environment.ObjectMeta.UID]; !ok {
-				deploy.logger.Error("function environment no longer exists",
+				deploy.logger.Warn("function environment no longer exists",
 					zap.String("environment", fsvc.Environment.ObjectMeta.Name),
 					zap.String("function", fsvc.Name))
 			}
 
-			fn, err := deploy.fissionClient.CoreV1().Functions(fsvc.Function.Namespace).Get(fsvc.Function.Name, metav1.GetOptions{})
+			fn, err := deploy.fissionClient.CoreV1().Functions(fsvc.Function.Namespace).Get(context.TODO(), fsvc.Function.Name, metav1.GetOptions{})
 			if err != nil {
 				// Newdeploy manager handles the function delete event and clean cache/kubeobjs itself,
 				// so we ignore the not found error for functions with newdeploy executor type here.
@@ -845,7 +819,10 @@ func (deploy *NewDeploy) idleObjectReaper() {
 				continue
 			}
 
+			deploy.fsCache.IdleTime(fsvc.Name, fsvc.Address, float64(time.Since(fsvc.Atime)-idlePodReapTime))
+
 			go func() {
+				startTime := time.Now()
 				deployObj := getDeploymentObj(fsvc.KubernetesObjects)
 				if deployObj == nil {
 					deploy.logger.Error("error finding function deployment", zap.Error(err), zap.String("function", fsvc.Function.Name))
@@ -853,7 +830,7 @@ func (deploy *NewDeploy) idleObjectReaper() {
 				}
 
 				currentDeploy, err := deploy.kubernetesClient.AppsV1().
-					Deployments(deployObj.Namespace).Get(deployObj.Name, metav1.GetOptions{})
+					Deployments(deployObj.Namespace).Get(context.TODO(), deployObj.Name, metav1.GetOptions{})
 				if err != nil {
 					deploy.logger.Error("error getting function deployment", zap.Error(err), zap.String("function", fsvc.Function.Name))
 					return
@@ -870,6 +847,7 @@ func (deploy *NewDeploy) idleObjectReaper() {
 				if err != nil {
 					deploy.logger.Error("error scaling down function deployment", zap.Error(err), zap.String("function", fsvc.Function.Name))
 				}
+				deploy.fsCache.ReapTime(fsvc.Function.Name, fsvc.Address, time.Since(startTime).Seconds())
 			}()
 		}
 	}
@@ -890,7 +868,7 @@ func (deploy *NewDeploy) scaleDeployment(deplNS string, deplName string, replica
 		zap.String("deployment", deplName),
 		zap.String("namespace", deplNS),
 		zap.Int32("replicas", replicas))
-	_, err := deploy.kubernetesClient.AppsV1().Deployments(deplNS).UpdateScale(deplName, &autoscalingv1.Scale{
+	_, err := deploy.kubernetesClient.AppsV1().Deployments(deplNS).UpdateScale(context.TODO(), deplName, &autoscalingv1.Scale{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deplName,
 			Namespace: deplNS,
@@ -898,6 +876,6 @@ func (deploy *NewDeploy) scaleDeployment(deplNS string, deplName string, replica
 		Spec: autoscalingv1.ScaleSpec{
 			Replicas: replicas,
 		},
-	})
+	}, metav1.UpdateOptions{})
 	return err
 }

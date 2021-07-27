@@ -30,17 +30,21 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
+	k8sInformers "k8s.io/client-go/informers"
+	k8sCache "k8s.io/client-go/tools/cache"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	"github.com/fission/fission/pkg/crd"
 	"github.com/fission/fission/pkg/executor/cms"
 	"github.com/fission/fission/pkg/executor/executortype"
+	"github.com/fission/fission/pkg/executor/executortype/container"
 	"github.com/fission/fission/pkg/executor/executortype/newdeploy"
 	"github.com/fission/fission/pkg/executor/executortype/poolmgr"
 	"github.com/fission/fission/pkg/executor/fscache"
 	"github.com/fission/fission/pkg/executor/reaper"
 	"github.com/fission/fission/pkg/executor/util"
 	fetcherConfig "github.com/fission/fission/pkg/fetcher/config"
+	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 )
 
 type (
@@ -54,7 +58,7 @@ type (
 		fissionClient *crd.FissionClient
 
 		requestChan chan *createFuncServiceRequest
-		fsCreateWg  map[string]*sync.WaitGroup
+		fsCreateWg  sync.Map
 	}
 
 	createFuncServiceRequest struct {
@@ -69,8 +73,9 @@ type (
 )
 
 // MakeExecutor returns an Executor for given ExecutorType(s).
-func MakeExecutor(logger *zap.Logger, cms *cms.ConfigSecretController,
-	fissionClient *crd.FissionClient, types map[fv1.ExecutorType]executortype.ExecutorType) (*Executor, error) {
+func MakeExecutor(ctx context.Context, logger *zap.Logger, cms *cms.ConfigSecretController,
+	fissionClient *crd.FissionClient, types map[fv1.ExecutorType]executortype.ExecutorType,
+	informers []k8sCache.SharedIndexInformer) (*Executor, error) {
 	executor := &Executor{
 		logger:        logger.Named("executor"),
 		cms:           cms,
@@ -78,14 +83,19 @@ func MakeExecutor(logger *zap.Logger, cms *cms.ConfigSecretController,
 		executorTypes: types,
 
 		requestChan: make(chan *createFuncServiceRequest),
-		fsCreateWg:  make(map[string]*sync.WaitGroup),
 	}
+
+	// Run all informers
+	for _, informer := range informers {
+		go informer.Run(ctx.Done())
+	}
+
 	for _, et := range types {
 		go func(et executortype.ExecutorType) {
-			et.Run(context.Background())
+			et.Run(ctx)
 		}(et)
 	}
-	go cms.Run(context.Background())
+
 	go executor.serveCreateFuncServices()
 
 	return executor, nil
@@ -128,13 +138,13 @@ func (executor *Executor) serveCreateFuncServices() {
 		}
 
 		// Cache miss -- is this first one to request the func?
-		wg, found := executor.fsCreateWg[crd.CacheKey(fnMetadata)]
+		wg, found := executor.fsCreateWg.Load(crd.CacheKey(fnMetadata))
 		if !found {
 			// create a waitgroup for other requests for
 			// the same function to wait on
 			wg := &sync.WaitGroup{}
 			wg.Add(1)
-			executor.fsCreateWg[crd.CacheKey(fnMetadata)] = wg
+			executor.fsCreateWg.Store(crd.CacheKey(fnMetadata), wg)
 
 			// launch a goroutine for each request, to parallelize
 			// the specialization of different functions
@@ -166,7 +176,7 @@ func (executor *Executor) serveCreateFuncServices() {
 					funcSvc: fsvc,
 					err:     err,
 				}
-				delete(executor.fsCreateWg, crd.CacheKey(fnMetadata))
+				executor.fsCreateWg.Delete(crd.CacheKey(fnMetadata))
 				wg.Done()
 			}()
 		} else {
@@ -174,6 +184,14 @@ func (executor *Executor) serveCreateFuncServices() {
 			go func() {
 				executor.logger.Debug("waiting for concurrent request for the same function",
 					zap.Any("function", fnMetadata))
+				wg, ok := wg.(*sync.WaitGroup)
+				if !ok {
+					err := fmt.Errorf("could not convert value to workgroup for function %v in namespace %v", fnMetadata.Name, fnMetadata.Namespace)
+					req.respChan <- &createFuncServiceResponse{
+						funcSvc: nil,
+						err:     err,
+					}
+				}
 				wg.Wait()
 
 				// get the function service from the cache
@@ -238,7 +256,7 @@ func serveMetric(logger *zap.Logger) {
 // StartExecutor Starts executor and the executor components such as Poolmgr,
 // deploymgr and potential future executor types
 func StartExecutor(logger *zap.Logger, functionNamespace string, envBuilderNamespace string, port int) error {
-	fissionClient, kubernetesClient, _, err := crd.MakeFissionClient()
+	fissionClient, kubernetesClient, _, metricsClient, err := crd.MakeFissionClient()
 	if err != nil {
 		return errors.Wrap(err, "failed to get kubernetes client")
 	}
@@ -257,19 +275,43 @@ func StartExecutor(logger *zap.Logger, functionNamespace string, envBuilderNames
 
 	logger.Info("Starting executor", zap.String("instanceID", executorInstanceID))
 
-	gpm := poolmgr.MakeGenericPoolManager(
+	informerFactory := genInformer.NewSharedInformerFactory(fissionClient, time.Second*30)
+	funcInformer := informerFactory.Core().V1().Functions().Informer()
+	pkgInformer := informerFactory.Core().V1().Packages().Informer()
+	envInformer := informerFactory.Core().V1().Environments().Informer()
+
+	gpm, err := poolmgr.MakeGenericPoolManager(
+		logger,
+		fissionClient, kubernetesClient, metricsClient,
+		functionNamespace, fetcherConfig, executorInstanceID,
+		&funcInformer, &pkgInformer,
+	)
+	if err != nil {
+		return errors.Wrap(err, "pool manager creation faied")
+	}
+
+	ndm, err := newdeploy.MakeNewDeploy(
 		logger,
 		fissionClient, kubernetesClient,
-		functionNamespace, fetcherConfig, executorInstanceID)
+		functionNamespace, fetcherConfig, executorInstanceID,
+		&funcInformer, &envInformer,
+	)
+	if err != nil {
+		return errors.Wrap(err, "new deploy manager creation faied")
+	}
 
-	ndm := newdeploy.MakeNewDeploy(
+	cnm, err := container.MakeContainer(
 		logger,
-		fissionClient, kubernetesClient, fissionClient.CoreV1().RESTClient(),
-		functionNamespace, fetcherConfig, executorInstanceID)
+		fissionClient, kubernetesClient,
+		functionNamespace, executorInstanceID, &funcInformer)
+	if err != nil {
+		return errors.Wrap(err, "container manager creation faied")
+	}
 
 	executorTypes := make(map[fv1.ExecutorType]executortype.ExecutorType)
 	executorTypes[gpm.GetTypeName()] = gpm
 	executorTypes[ndm.GetTypeName()] = ndm
+	executorTypes[cnm.GetTypeName()] = cnm
 
 	adoptExistingResources, _ := strconv.ParseBool(os.Getenv("ADOPT_EXISTING_RESOURCES"))
 
@@ -288,9 +330,16 @@ func StartExecutor(logger *zap.Logger, functionNamespace string, envBuilderNames
 	// TODO: use context to control the waiting time once kubernetes client supports it.
 	util.WaitTimeout(wg, 30*time.Second)
 
-	cms := cms.MakeConfigSecretController(logger, fissionClient, kubernetesClient, executorTypes)
+	k8sInformerFactory := k8sInformers.NewSharedInformerFactory(kubernetesClient, time.Second*30)
+	configmapInformer := k8sInformerFactory.Core().V1().ConfigMaps().Informer()
+	secretInformer := k8sInformerFactory.Core().V1().Secrets().Informer()
 
-	api, err := MakeExecutor(logger, cms, fissionClient, executorTypes)
+	cms := cms.MakeConfigSecretController(logger, fissionClient, kubernetesClient, executorTypes, &configmapInformer, &secretInformer)
+
+	ctx := context.Background()
+	api, err := MakeExecutor(ctx, logger, cms, fissionClient, executorTypes, []k8sCache.SharedIndexInformer{
+		funcInformer, pkgInformer, envInformer, configmapInformer, secretInformer,
+	})
 	if err != nil {
 		return err
 	}

@@ -29,7 +29,9 @@ import (
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	"github.com/fission/fission/pkg/fission-cli/cliwrapper/cli"
 	"github.com/fission/fission/pkg/fission-cli/cmd"
+	"github.com/fission/fission/pkg/fission-cli/console"
 	flagkey "github.com/fission/fission/pkg/fission-cli/flag/key"
+	"github.com/fission/fission/pkg/fission-cli/util"
 	"github.com/fission/fission/pkg/utils"
 )
 
@@ -65,6 +67,11 @@ func (opts *UpdateSubCommand) complete(input cli.Input) error {
 	}
 
 	opts.env = env
+
+	err = util.ApplyLabelsAndAnnotations(input, &opts.env.ObjectMeta)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -103,6 +110,9 @@ func updateExistingEnvironmentWithCmd(env *fv1.Environment, input cli.Input) (*f
 
 	if input.IsSet(flagkey.EnvPoolsize) {
 		env.Spec.Poolsize = input.Int(flagkey.EnvPoolsize)
+		if env.Spec.Poolsize < 1 {
+			console.Warn("poolsize is not positive, if you are using pool manager please set positive value")
+		}
 	}
 
 	if input.IsSet(flagkey.EnvGracePeriod) {

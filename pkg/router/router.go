@@ -43,6 +43,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strconv"
 	"strings"
@@ -63,7 +64,7 @@ import (
 
 // request url ---[trigger]---> Function(name, deployment) ----[deployment]----> Function(name, uid) ----[pool mgr]---> k8s service url
 
-func router(ctx context.Context, logger *zap.Logger, httpTriggerSet *HTTPTriggerSet, resolver *functionReferenceResolver) *mutableRouter {
+func router(ctx context.Context, logger *zap.Logger, httpTriggerSet *HTTPTriggerSet) *mutableRouter {
 	var mr *mutableRouter
 
 	// see issue https://github.com/fission/fission/issues/1317
@@ -74,13 +75,13 @@ func router(ctx context.Context, logger *zap.Logger, httpTriggerSet *HTTPTrigger
 		mr = newMutableRouter(logger, mux.NewRouter())
 	}
 
-	httpTriggerSet.subscribeRouter(ctx, mr, resolver)
+	httpTriggerSet.subscribeRouter(ctx, mr)
 	return mr
 }
 
 func serve(ctx context.Context, logger *zap.Logger, port int, tracingSamplingRate float64,
-	httpTriggerSet *HTTPTriggerSet, resolver *functionReferenceResolver, displayAccessLog bool) {
-	mr := router(ctx, logger, httpTriggerSet, resolver)
+	httpTriggerSet *HTTPTriggerSet, displayAccessLog bool) {
+	mr := router(ctx, logger, httpTriggerSet)
 	url := fmt.Sprintf(":%v", port)
 
 	err := http.ListenAndServe(url, &ochttp.Handler{
@@ -93,8 +94,11 @@ func serve(ctx context.Context, logger *zap.Logger, port int, tracingSamplingRat
 				}
 			}
 			if displayAccessLog {
-				logger.Info("path", zap.String("path", r.URL.Path),
-					zap.String("method", r.Method), zap.Any("header", r.Header))
+				reqMsg, err := httputil.DumpRequest(r, false)
+				if err != nil {
+					logger.Error("error dumping request", zap.Error(err))
+				}
+				logger.Info("request dump", zap.String("request", string(reqMsg)))
 			}
 			return trace.StartOptions{
 				Sampler: trace.ProbabilitySampler(tracingSamplingRate),
@@ -119,11 +123,9 @@ func serveMetric(logger *zap.Logger) {
 
 // Start starts a router
 func Start(logger *zap.Logger, port int, executorURL string) {
-	_ = MakeAnalytics("")
-
 	fmap := makeFunctionServiceMap(logger, time.Minute)
 
-	fissionClient, kubeClient, _, err := crd.MakeFissionClient()
+	fissionClient, kubeClient, _, _, err := crd.MakeFissionClient()
 	if err != nil {
 		logger.Fatal("error connecting to kubernetes API", zap.Error(err))
 	}
@@ -238,7 +240,7 @@ func Start(logger *zap.Logger, port int, executorURL string) {
 			zap.Bool("default", displayAccessLog))
 	}
 
-	triggers, _, fnStore := makeHTTPTriggerSet(logger.Named("triggerset"), fmap, fissionClient, kubeClient, executor, fissionClient.CoreV1().RESTClient(), &tsRoundTripperParams{
+	triggers := makeHTTPTriggerSet(logger.Named("triggerset"), fmap, fissionClient, kubeClient, executor, &tsRoundTripperParams{
 		timeout:           timeout,
 		timeoutExponent:   timeoutExponent,
 		disableKeepAlive:  disableKeepAlive,
@@ -247,12 +249,10 @@ func Start(logger *zap.Logger, port int, executorURL string) {
 		svcAddrRetryCount: svcAddrRetryCount,
 	}, isDebugEnv, unTapServiceTimeout, throttler.MakeThrottler(svcAddrUpdateTimeout))
 
-	resolver := makeFunctionReferenceResolver(fnStore)
-
 	go serveMetric(logger)
 
 	logger.Info("starting router", zap.Int("port", port))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	serve(ctx, logger, port, tracingSamplingRate, triggers, resolver, displayAccessLog)
+	serve(ctx, logger, port, tracingSamplingRate, triggers, displayAccessLog)
 }

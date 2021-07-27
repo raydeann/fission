@@ -55,6 +55,7 @@ const (
 const (
 	ExecutorTypePoolmgr   ExecutorType = "poolmgr"
 	ExecutorTypeNewdeploy ExecutorType = "newdeploy"
+	ExecutorTypeContainer ExecutorType = "container"
 )
 
 const (
@@ -66,6 +67,8 @@ const (
 	SharedVolumePackages   = "packages"
 	SharedVolumeSecrets    = "secrets"
 	SharedVolumeConfigmaps = "configmaps"
+	PodInfoVolume          = "podinfo"
+	PodInfoMount           = "/etc/podinfo"
 )
 
 const (

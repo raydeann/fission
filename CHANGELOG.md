@@ -1,23 +1,82 @@
-# 1.12.0
-[Documentation](https://docs.fission.io/)
-## Downloads for 1.12.0
-
-
-filename | sha256 hash
--------- | -----------
-[fission-all-1.12.0.tgz](https://github.com/fission/fission/releases/download/1.12.0/fission-all-1.12.0.tgz) | `10dfa6df66cfcc7f4887086357857ff25cb7e7e2f906b9c11e2d70e1a7bc8113`
-[fission-core-1.12.0.tgz](https://github.com/fission/fission/releases/download/1.12.0/fission-core-1.12.0.tgz) | `89d745e2130cf7ff281b35100482d6560a2880f0a4e34ffda6428070eccd1945`
-[fission-cli-linux](https://github.com/fission/fission/releases/download/1.12.0/fission-cli-linux) | `bcb3d84a424af45fb8ba5e846238475e481c01907eb10d38a3a614b288da785c`
-[fission-cli-windows.exe](https://github.com/fission/fission/releases/download/1.12.0/fission-cli-windows.exe) | `005f5404545d49546259ee801b52987cb375816ba1c341f8e8fc6f316b16c0b2`
-[fission-cli-osx](https://github.com/fission/fission/releases/download/1.12.0/fission-cli-osx) | `d6c192b96cca741e264c6bacb900ebe40419c4a68e2cec93a889c5c2874ecd5b`
-[fission-core-1.12.0.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-core-1.12.0.yaml) | `2908fc54ed514b0c600664c5b7cacc35dd9fdb242269c1be3e589d53fbc4f8e5`
-[fission-all-1.12.0.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-all-1.12.0.yaml) | `2a95051c91a507944805eed26103d1ccfa1e222951645a314814cac912e41391`
-[fission-all-1.12.0-minikube.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-all-1.12.0-minikube.yaml) | `91bf41f63ac449861ddf3fc5a0b0ecd061a20f7e17331b8d913f17ac76e65649`
-[fission-core-1.12.0-minikube.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-core-1.12.0-minikube.yaml) | `b71a5f0314e32d0fe3a98c5cbe22308c265203daeea342855a847c1185ce368a`
-[fission-all-1.12.0-openshift.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-all-1.12.0-openshift.yaml) | `906fb10ea9d052e455c9f50613ee6b54ab8bd93d7d7350740ceaf8fdf8618ac4`
-[fission-core-1.12.0-openshift.yaml](https://github.com/fission/fission/releases/download/1.12.0/fission-core-1.12.0-openshift.yaml) | `b46908adf6dda8601ac975b6fa0b32e7564b08d54347e106ce04b5e2d01e47b1`
-
 # Changelog
+
+## [v1.13.1](https://github.com/fission/fission/tree/v1.13.1) (2021-06-21)
+
+[Full Changelog](https://github.com/fission/fission/compare/1.13.1...v1.13.1)
+
+## [1.13.1](https://github.com/fission/fission/tree/1.13.1) (2021-06-21)
+
+[Full Changelog](https://github.com/fission/fission/compare/v1.13.0...1.13.1)
+
+**Merged pull requests:**
+
+- Changes for 1.13.1 release [\#2087](https://github.com/fission/fission/pull/2087) ([sanketsudake](https://github.com/sanketsudake))
+- Ignore errors from zap logger Sync [\#2086](https://github.com/fission/fission/pull/2086) ([sanketsudake](https://github.com/sanketsudake))
+- Correct release name in release script for non helm install [\#2084](https://github.com/fission/fission/pull/2084) ([sanketsudake](https://github.com/sanketsudake))
+- Use codeql for code scanning [\#2078](https://github.com/fission/fission/pull/2078) ([sanketsudake](https://github.com/sanketsudake))
+- Lint fix [\#2074](https://github.com/fission/fission/pull/2074) ([RealHarshThakur](https://github.com/RealHarshThakur))
+
+## [v1.13.0](https://github.com/fission/fission/tree/v1.13.0) (2021-06-16)
+
+[Full Changelog](https://github.com/fission/fission/compare/v1.12.0...v1.13.0)
+
+## [1.13.0](https://github.com/fission/fission/tree/1.13.0) (2021-06-16)
+
+[Full Changelog](https://github.com/fission/fission/compare/v1.12.0...1.13.0)
+
+**Merged pull requests:**
+
+- Generate and archive fission cli per OS and platform [\#2071](https://github.com/fission/fission/pull/2071) ([sanketsudake](https://github.com/sanketsudake))
+- Changes for releasing 1.13 [\#2070](https://github.com/fission/fission/pull/2070) ([sanketsudake](https://github.com/sanketsudake))
+- Fix golang lint errors [\#2068](https://github.com/fission/fission/pull/2068) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Correct docker platforms and optimize make commands [\#2066](https://github.com/fission/fission/pull/2066) ([sanketsudake](https://github.com/sanketsudake))
+- Added GCP PubSub Image, enabled Keda by default and updated versions of all Keda connector images [\#2065](https://github.com/fission/fission/pull/2065) ([vishal-biyani](https://github.com/vishal-biyani))
+- Support for multiple HTTP verbs in routes/HTTPTrigger [\#2064](https://github.com/fission/fission/pull/2064) ([sanketsudake](https://github.com/sanketsudake))
+- Add a SharedIndexInformer for services and deployments to NewDeploy executor [\#2061](https://github.com/fission/fission/pull/2061) ([sanketsudake](https://github.com/sanketsudake))
+- Move RBAC v1beta1 to v1 [\#2059](https://github.com/fission/fission/pull/2059) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Collect fission dump if CI tests fails & enable manual trigger [\#2058](https://github.com/fission/fission/pull/2058) ([sanketsudake](https://github.com/sanketsudake))
+- Capture timestamp whenever cleanup is triggered in tests [\#2054](https://github.com/fission/fission/pull/2054) ([sanketsudake](https://github.com/sanketsudake))
+- Add websocket test [\#2053](https://github.com/fission/fission/pull/2053) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Wait for small time to avoid timeout in specs tests [\#2052](https://github.com/fission/fission/pull/2052) ([sanketsudake](https://github.com/sanketsudake))
+- Added fission upgrade workflow [\#2050](https://github.com/fission/fission/pull/2050) ([jithindevasia](https://github.com/jithindevasia))
+- Add make targets for CRDs  [\#2049](https://github.com/fission/fission/pull/2049) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Add role required by fetcher pod to fetch events & pods in helm chart [\#2048](https://github.com/fission/fission/pull/2048) ([sanketsudake](https://github.com/sanketsudake))
+- Enable prefix based routing [\#2047](https://github.com/fission/fission/pull/2047) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Change container name for runtime container to environment name in newdeploy [\#2044](https://github.com/fission/fission/pull/2044) ([sanketsudake](https://github.com/sanketsudake))
+- Change examples references to examples repostiory [\#2038](https://github.com/fission/fission/pull/2038) ([sanketsudake](https://github.com/sanketsudake))
+- OnlyOnce preupgrade check [\#2037](https://github.com/fission/fission/pull/2037) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Add router cache back for performance comparison [\#2036](https://github.com/fission/fission/pull/2036) ([sanketsudake](https://github.com/sanketsudake))
+- Cleanup and remove hardcoding from delete-crds script [\#2035](https://github.com/fission/fission/pull/2035) ([sanketsudake](https://github.com/sanketsudake))
+- Crds update [\#2033](https://github.com/fission/fission/pull/2033) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Use latest 1.14 go version in CI [\#2032](https://github.com/fission/fission/pull/2032) ([sanketsudake](https://github.com/sanketsudake))
+- Handle SIGTERM signal in mqtrigger subscriber [\#2029](https://github.com/fission/fission/pull/2029) ([sanketsudake](https://github.com/sanketsudake))
+- Update deprecated functions/methods calls [\#2027](https://github.com/fission/fission/pull/2027) ([gauravgahlot](https://github.com/gauravgahlot))
+- Keda podspec [\#2021](https://github.com/fission/fission/pull/2021) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Add metrics to Reaper [\#2019](https://github.com/fission/fission/pull/2019) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Change alpine base image from 3.10 to 3.13 [\#2017](https://github.com/fission/fission/pull/2017) ([sanketsudake](https://github.com/sanketsudake))
+- \[Snyk\] Security upgrade golang from 1.12.13 to 1.16.3 [\#2016](https://github.com/fission/fission/pull/2016) ([snyk-bot](https://github.com/snyk-bot))
+- Add Google Analytics reporting in place of existing custom reporting [\#2015](https://github.com/fission/fission/pull/2015) ([sanketsudake](https://github.com/sanketsudake))
+- Add preupgrade check for RPP [\#2014](https://github.com/fission/fission/pull/2014) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Restoring one example as it is used in many places including Helm charts [\#2011](https://github.com/fission/fission/pull/2011) ([vishal-biyani](https://github.com/vishal-biyani))
+- Websocket reaper [\#1982](https://github.com/fission/fission/pull/1982) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Increase default concurrency [\#1980](https://github.com/fission/fission/pull/1980) ([therahulbhati](https://github.com/therahulbhati))
+- Serve only one request and garbage collect [\#1978](https://github.com/fission/fission/pull/1978) ([therahulbhati](https://github.com/therahulbhati))
+- Fix wrong checksum was assigned [\#1968](https://github.com/fission/fission/pull/1968) ([life1347](https://github.com/life1347))
+- Add a warning if spec is applied on a dirty worktree [\#1966](https://github.com/fission/fission/pull/1966) ([hellozee](https://github.com/hellozee))
+- Fix log sort order when multiple series are returned [\#1956](https://github.com/fission/fission/pull/1956) ([LittleFox94](https://github.com/LittleFox94))
+- Add a SharedIndexInformer for pods to router. [\#1951](https://github.com/fission/fission/pull/1951) ([irgeek](https://github.com/irgeek))
+- Feature request per pod [\#1946](https://github.com/fission/fission/pull/1946) ([therahulbhati](https://github.com/therahulbhati))
+- feat: Add image pull policy when create KEDA connector deployments [\#1944](https://github.com/fission/fission/pull/1944) ([chenjr0719](https://github.com/chenjr0719))
+- Maintain CRD folder to keep track of Schemas [\#1938](https://github.com/fission/fission/pull/1938) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Feature/router core component pod config [\#1936](https://github.com/fission/fission/pull/1936) ([adamkgray](https://github.com/adamkgray))
+- Add fields to pod spec [\#1932](https://github.com/fission/fission/pull/1932) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- Multiarch release [\#1929](https://github.com/fission/fission/pull/1929) ([RealHarshThakur](https://github.com/RealHarshThakur))
+- updated helm charts to v2 and updated prometheus chart url, version [\#1923](https://github.com/fission/fission/pull/1923) ([tusharRepo](https://github.com/tusharRepo))
+
+
+## [v1.12.0](https://github.com/fission/fission/tree/v1.12.0) (2021-02-11)
+
+[Full Changelog](https://github.com/fission/fission/compare/1.12.0...v1.12.0)
 
 ## [1.12.0](https://github.com/fission/fission/tree/1.12.0) (2021-02-11)
 

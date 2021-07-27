@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -157,7 +158,7 @@ func TestHTTPTriggerApi(t *testing.T) {
 			Namespace: testNS,
 		},
 		Spec: fv1.HTTPTriggerSpec{
-			Method:      http.MethodGet,
+			Methods:     []string{http.MethodGet},
 			RelativeURL: "/hello",
 			FunctionReference: fv1.FunctionReference{
 				Type: fv1.FunctionReferenceTypeFunctionName,
@@ -180,7 +181,7 @@ func TestHTTPTriggerApi(t *testing.T) {
 
 	tr, err := g.Client().V1().HTTPTrigger().Get(m)
 	panicIf(err)
-	assert(testTrigger.Spec.Method == tr.Spec.Method &&
+	assert(len(testTrigger.Spec.Methods) == len(tr.Spec.Methods) &&
 		testTrigger.Spec.RelativeURL == tr.Spec.RelativeURL &&
 		testTrigger.Spec.FunctionReference.Type == tr.Spec.FunctionReference.Type &&
 		testTrigger.Spec.FunctionReference.Name == tr.Spec.FunctionReference.Name, "trigger should match after reading")
@@ -354,18 +355,18 @@ func TestMain(m *testing.M) {
 		return
 	}
 
-	_, kubeClient, _, err := crd.GetKubernetesClient()
+	_, kubeClient, _, _, err := crd.GetKubernetesClient()
 	panicIf(err)
 
 	// testNS isolation for running multiple CI builds concurrently.
 	testNS = uuid.NewV4().String()
-	_, err = kubeClient.CoreV1().Namespaces().Create(&v1.Namespace{
+	_, err = kubeClient.CoreV1().Namespaces().Create(context.TODO(), &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: testNS,
 		},
-	})
+	}, metav1.CreateOptions{})
 	panicIf(err)
-	defer panicIf(kubeClient.CoreV1().Namespaces().Delete(testNS, nil))
+	defer panicIf(kubeClient.CoreV1().Namespaces().Delete(context.TODO(), testNS, metav1.DeleteOptions{}))
 
 	config := zap.NewDevelopmentConfig()
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
